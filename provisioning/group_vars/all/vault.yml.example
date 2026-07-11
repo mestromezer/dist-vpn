@@ -1,0 +1,47 @@
+---
+# ФОРМА того, что должно быть зашифровано через Ansible Vault — этот файл сам
+# НЕ зашифрован и НЕ содержит настоящих секретов, он в git специально как
+# документация ожидаемой формы. Реальный файл создаётся так:
+#
+#   cd provisioning
+#   cp group_vars/all/vault.yml.example group_vars/all/vault.yml
+#   # заполнить настоящими значениями (см. комментарии ниже), затем:
+#   ansible-vault encrypt group_vars/all/vault.yml
+#
+# (или сразу `ansible-vault create group_vars/all/vault.yml` и вставить эту
+# форму внутрь редактора, который откроет ansible-vault). Пароль от Vault —
+# см. README «Секреты и Vault» — НЕ в репозитории, файл с паролем уже
+# покрыт корневым .gitignore (vault_pass.txt, *.vault-password).
+#
+# group_vars/all/vault.yml (реальный, зашифрованный файл) — в
+# provisioning/.gitignore, в репозиторий не попадает никогда.
+
+# Пароль sudo для provision_user, используемый САМИМ Ansible при
+# необходимости become на уже захарденной ноде (PasswordAuthentication no,
+# подключение только по ключу — но sudo внутри сессии может требовать пароль
+# пользователя, если group_vars/all/main.yml: provision_user_nopasswd_sudo
+# выставлен в false). Это стандартная magic-переменная Ansible.
+# Сгенерировать случайный пароль: openssl rand -base64 24
+ansible_become_password: "CHANGE_ME_generate_with_openssl_rand_-base64_24"
+
+# Тот же пароль, но в виде crypt-хэша — используется при создании пользователя
+# (roles/base_hardening/tasks/user.yml, ansible.builtin.user: password:).
+# Значение ansible_become_password (plaintext) и хэш ниже ДОЛЖНЫ
+# соответствовать одному и тому же паролю. Сгенерировать хэш:
+#   python3 -c "import crypt,getpass; print(crypt.crypt(getpass.getpass(), crypt.mksalt(crypt.METHOD_SHA512)))"
+# (или mkpasswd --method=sha-512 из пакета whois на Debian/Ubuntu)
+vault_provision_user_password_hash: "$6$CHANGE_ME$replace_with_a_real_sha512_crypt_hash"
+
+# --- Плейсхолдеры следующего слайса (не используются ни одной задачей этого
+# слайса — ни один playbook/роль сейчас их не читает; задел под будущую роль
+# agent_install, см. ТЗ-4 §5.2 и README «Scope of this slice / TODO») ---
+
+# Адрес Platform, к которому Agent должен подключиться при enrollment'е.
+agent_platform_address: "CHANGE_ME_platform.example.internal:PORT"
+
+# Одноразовый enrollment-токен Agent'а (ТЗ-4 §5.2) — выдаётся Platform,
+# используется один раз при первом запуске контейнера Agent'а, после выдачи
+# mTLS-сертификата токен становится бесполезен. Никогда не передавать этот
+# токен как обычную (незашифрованную) -e переменную или в команде оболочки —
+# только через это Vault-значение.
+agent_enrollment_token: "CHANGE_ME_one_time_token_from_platform"

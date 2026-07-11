@@ -1,0 +1,7 @@
+---
+# Роль ноды для параметризации ролей provisioning (см.
+# roles/base_hardening/defaults/main.yml: role_firewall_rules, и site.yml).
+# Переопределяется явно через -e role=entry|exit — extra-vars в Ansible
+# всегда имеют приоритет над group_vars, так что это безопасный default,
+# а не единственный способ задать роль.
+role: entry

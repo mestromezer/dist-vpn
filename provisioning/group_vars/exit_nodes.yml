@@ -1,0 +1,3 @@
+---
+# См. group_vars/entry_nodes.yml — тот же механизм, роль "exit".
+role: exit
