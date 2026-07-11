@@ -1,0 +1,16 @@
+---
+# Канал официального apt-репозитория Docker (не путать с версией Ubuntu):
+# stable | test | nightly. См. https://download.docker.com/linux/ubuntu/.
+docker_apt_repo_channel: stable
+
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# Добавить provision_user (group_vars/all/main.yml) в группу docker, чтобы
+# им можно было управлять контейнерами (в т.ч. будущим контейнером Agent'а)
+# без sudo на каждую команду.
+docker_add_provision_user_to_group: true
