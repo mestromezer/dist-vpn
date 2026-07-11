@@ -68,6 +68,21 @@ paths:
   /auth/logout:
     post:
       summary: Отзыв текущего refresh-токена
+      # Уточнено после реализации Admin Client (см. admin-client/README.md,
+      # "Замечания к контракту"): без явного тела было неясно, какой именно
+      # refresh-токен отзывать. refresh_token — опционально (не ломает уже
+      # реализованный клиент, который его пока не отправляет), но рекомендуется
+      # передавать явно, а не полагаться на то, что сервер сам сопоставит сессию
+      # по access-токену из Authorization — тот может быть уже почти просрочен
+      # или не содержать однозначного session id.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string, description: "Рекомендуется передавать явно" }
       responses:
         "204": { description: OK }
 
@@ -151,6 +166,7 @@ paths:
                 type: object
                 properties:
                   items: { type: array, items: { $ref: "#/components/schemas/Cascade" } }
+                  total: { type: integer, description: "Согласовано с /nodes — обязательно для точной пагинации на клиенте" }
     post:
       summary: Собрать новый каскад (входная нода + пул выходных кандидатов)
       requestBody:
@@ -242,6 +258,7 @@ paths:
                 type: object
                 properties:
                   items: { type: array, items: { $ref: "#/components/schemas/User" } }
+                  total: { type: integer, description: "Согласовано с /nodes — обязательно для точной пагинации на клиенте" }
     post:
       summary: Создать пользователя (см. TZ-5 §4.4)
       requestBody:
