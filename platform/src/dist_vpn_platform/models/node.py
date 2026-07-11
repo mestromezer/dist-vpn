@@ -1,0 +1,63 @@
+"""Node - a member of the fleet pool (TZ-5 §3, §4.1). Role/status enums match the
+values fixed by the contracts (contracts/rest/openapi.yaml NodeRole/NodeStatus and
+contracts/proto/agent_control.proto NodeRole) - do not diverge from those."""
+from __future__ import annotations
+
+import enum
+from datetime import datetime
+
+from sqlalchemy import DateTime, Float, ForeignKey, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from dist_vpn_platform.models.base import Base, new_uuid, sa_enum, utcnow
+
+
+class NodeRole(str, enum.Enum):
+    ENTRY = "entry"
+    EXIT = "exit"
+
+
+class NodeStatus(str, enum.Enum):
+    ENROLLING = "enrolling"
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    DOWN = "down"
+    DECOMMISSIONED = "decommissioned"
+
+
+class Node(Base):
+    __tablename__ = "nodes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    role: Mapped[NodeRole] = mapped_column(sa_enum(NodeRole), nullable=False)
+    region: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[NodeStatus] = mapped_column(
+        sa_enum(NodeStatus), nullable=False, default=NodeStatus.ENROLLING
+    )
+    agent_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Last reported NodeHealth (agent_control.proto) - used to derive `status` transitions
+    # and surfaced to the Admin Client for the "what/where broke" requirement (TZ-5 §4.3).
+    xray_container_running: Mapped[bool | None] = mapped_column(nullable=True)
+    cpu_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mem_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    disk_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # mTLS identity (TZ-5 §6.2). Real step-ca issuance is out of scope for this slice -
+    # see platform/README.md TODO section; column exists so the schema doesn't need to
+    # change when that lands.
+    mtls_cert_fingerprint: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    enrollment_token_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("enrollment_tokens.id"), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    decommissioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    enrollment_token: Mapped["EnrollmentToken | None"] = relationship(back_populates="node")
