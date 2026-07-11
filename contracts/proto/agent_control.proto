@@ -1,0 +1,193 @@
+// Контракт Agent <-> Platform (control-plane).
+// Источник требований: ../../docs/TZ-4-agent.md (§3, §4, §5.1), ../../docs/TZ-5-platform.md (§4.3, §4.4, §4.5).
+//
+// Модель: Agent сам инициирует и держит открытым один bidi-streaming RPC (dial-out,
+// см. TZ-4 §5.1 — паттерн reverse-tunnel по образцу Teleport). Platform никогда не открывает
+// соединение к Agent'у первой. Внутри потока Agent отправляет AgentMessage (enrollment,
+// heartbeat, телеметрия, результаты команд/тестов), Platform отвечает PlatformMessage
+// (подтверждение enrollment, команды, ping для keep-alive).
+//
+// Версионирование: изменения в этом файле — только через PR, т.к. от него зависят
+// одновременно Agent и Platform (разные команды/сессии разработки). Обратно несовместимые
+// изменения — через package (v2) и параллельную поддержку на переходный период, не breaking
+// change в v1 без согласования.
+
+syntax = "proto3";
+
+package distvpn.control.v1;
+
+option go_package = "distvpn/control/v1;controlv1";
+
+service AgentControl {
+  // Единственный метод канала управления. Вызывается Agent'ом при старте, живёт весь
+  // срок работы Agent'а; переподключение — с новым enrollment_token или, после первого
+  // успешного enrollment, с постоянным mTLS-сертификатом ноды (см. TZ-4 §5.2).
+  rpc Session(stream AgentMessage) returns (stream PlatformMessage);
+}
+
+// ---- Сообщения от Agent к Platform ----
+
+message AgentMessage {
+  oneof payload {
+    Enrollment enrollment = 1;
+    Heartbeat heartbeat = 2;
+    TelemetryReport telemetry = 3;
+    CommandResult command_result = 4;
+    TestResult test_result = 5;
+  }
+}
+
+message Enrollment {
+  string enrollment_token = 1; // одноразовый, TTL, см. TZ-4 §5.2 / TZ-5 §6.2
+  string hostname = 2;
+  string agent_version = 3;
+  NodeRole requested_role = 4;
+}
+
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED = 0;
+  NODE_ROLE_ENTRY = 1; // РФ-входная нода (Hop A)
+  NODE_ROLE_EXIT = 2;  // зарубежная выходная нода (Hop B)
+}
+
+message Heartbeat {
+  string node_id = 1;
+  NodeHealth health = 2;
+  int64 timestamp_unix = 3;
+}
+
+message NodeHealth {
+  bool xray_container_running = 1;
+  double cpu_percent = 2;
+  double mem_percent = 3;
+  double disk_percent = 4;
+}
+
+// Только байтовые счётчики — принцип приватности из TZ-4 §3.5 / TZ-5 §6.4:
+// НИКОГДА адреса назначения или содержимое трафика.
+message TelemetryReport {
+  string node_id = 1;
+  repeated UsageCounter counters = 2;
+  int64 timestamp_unix = 3;
+}
+
+message UsageCounter {
+  string scope = 1; // "user" | "inbound" | "outbound"
+  string key = 2;   // email пользователя ИЛИ tag inbound/outbound
+  uint64 uplink_bytes = 3;
+  uint64 downlink_bytes = 4;
+}
+
+message CommandResult {
+  string command_id = 1; // соответствует Command.command_id
+  bool success = 2;
+  string error_message = 3; // пусто, если success=true
+}
+
+// Человекочитаемый результат тест-запроса — см. TZ-4 §3.4, TZ-5 §4.3
+// ("не просто ok/fail, а на каком шаге отказ").
+message TestResult {
+  string test_id = 1;
+  TestOutcome outcome = 2;
+  int32 latency_ms = 3;
+  string detail = 4;
+}
+
+enum TestOutcome {
+  TEST_OUTCOME_UNSPECIFIED = 0;
+  TEST_OUTCOME_SUCCESS = 1;
+  TEST_OUTCOME_CONTAINER_START_FAILED = 2;
+  TEST_OUTCOME_TLS_HANDSHAKE_FAILED = 3;
+  TEST_OUTCOME_PROXY_NO_RESPONSE = 4;
+  TEST_OUTCOME_TIMEOUT = 5;
+}
+
+// ---- Сообщения от Platform к Agent ----
+
+message PlatformMessage {
+  oneof payload {
+    EnrollmentAck enrollment_ack = 1;
+    Command command = 2;
+    Ping ping = 3;
+  }
+}
+
+message EnrollmentAck {
+  string node_id = 1;
+  bool accepted = 2;
+  string reason = 3; // заполнено, если accepted=false
+  bytes mtls_client_cert_pem = 4; // выдаётся один раз при первом enrollment, см. TZ-4 §5.2
+}
+
+message Command {
+  string command_id = 1; // Agent обязан вернуть тот же id в CommandResult
+  oneof op {
+    AddInbound add_inbound = 2;
+    RemoveInbound remove_inbound = 3;
+    AddOutbound add_outbound = 4;
+    RemoveOutbound remove_outbound = 5;
+    AddUser add_user = 6;
+    RemoveUser remove_user = 7;
+    AddRoutingRule add_routing_rule = 8;
+    RemoveRoutingRule remove_routing_rule = 9;
+    OverrideBalancer override_balancer = 10;
+    RunTest run_test = 11;
+    RotateSecret rotate_secret = 12;
+  }
+}
+
+// Прямая проекция на Xray HandlerService/RoutingService (см. TZ-4 §3.2) — Agent сам
+// транслирует эти команды в нативные gRPC-вызовы к локальному Xray-core.
+message AddInbound {
+  string inbound_json = 1; // валидный фрагмент {"inbounds":[{...}]}, см. схемы в истории проекта
+}
+message RemoveInbound {
+  string tag = 1;
+}
+message AddOutbound {
+  string outbound_json = 1;
+}
+message RemoveOutbound {
+  string tag = 1;
+}
+message AddUser {
+  string inbound_tag = 1;
+  string uuid = 2;
+  string email = 3;
+  string flow = 4; // пусто, если пресету не требуется flow (см. таблицу в TZ-4 §3.2/§3.3)
+}
+message RemoveUser {
+  string inbound_tag = 1;
+  string email = 2;
+}
+message AddRoutingRule {
+  string rule_tag = 1;
+  string rule_json = 2;
+}
+message RemoveRoutingRule {
+  string rule_tag = 1;
+}
+message OverrideBalancer {
+  string balancer_tag = 1;
+  string target_outbound_tag = 2; // пустая строка = снять override
+}
+message RunTest {
+  string test_id = 1;
+  string preset_client_config_json = 2; // тестовый клиентский конфиг, см. TZ-4 §3.4
+  string probe_url = 3;
+  int32 timeout_seconds = 4;
+}
+message RotateSecret {
+  string rotation_id = 1;
+  RotationKind kind = 2;
+}
+enum RotationKind {
+  ROTATION_KIND_UNSPECIFIED = 0;
+  ROTATION_KIND_HOPA_PRESET = 1; // двухфазная ротация клиентского пресета (TZ-4 §3.3)
+  ROTATION_KIND_HOPB_KEY = 2;    // ротация ключей backhaul-транспорта
+  ROTATION_KIND_P4_CERT = 3;     // просто сигнал "обнови сертификат", хот-релоад делает Xray сам
+}
+
+message Ping {
+  int64 timestamp_unix = 1;
+}

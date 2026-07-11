@@ -1,0 +1,399 @@
+# Контракт Platform <-> Admin Client (REST + WebSocket).
+# Источник требований: ../../docs/TZ-5-platform.md (§3, §4.3, §4.4, §7), ../../docs/TZ-6-admin-client.md.
+#
+# Статус: черновик v0.1 — покрывает основные ресурсы для старта параллельной разработки
+# Platform и Admin Client. Изменения — через PR (от файла зависят обе стороны).
+# WebSocket-канал /events описан отдельно в конце файла (OpenAPI 3.1 не покрывает WS нативно).
+
+openapi: 3.1.0
+info:
+  title: dist-vpn Platform API
+  version: 0.1.0
+  description: >
+    REST API для управления пулом нод, каскадами, пользователями и мониторингом.
+    Приватность: эндпоинты потребления (/usage) отдают только байтовые счётчики,
+    без адресов назначения и содержимого трафика (см. TZ-5 §6.4).
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/login:
+    post:
+      summary: Вход администратора
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+                totp_code: { type: string, description: "Код TOTP, если включена MFA (см. TZ-5 §6.3)" }
+      responses:
+        "200":
+          description: Успешный вход
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "401": { description: Неверные учётные данные }
+        "429": { description: "Превышен лимит попыток (rate limiting, см. TZ-5 §6.3)" }
+
+  /auth/refresh:
+    post:
+      summary: Обновление access-токена по refresh-токену (с ротацией)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "401": { description: "Refresh-токен недействителен/отозван" }
+
+  /auth/logout:
+    post:
+      summary: Отзыв текущего refresh-токена
+      responses:
+        "204": { description: OK }
+
+  /nodes:
+    get:
+      summary: Список нод пула
+      parameters:
+        - { name: role, in: query, schema: { $ref: "#/components/schemas/NodeRole" } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/NodeStatus" } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Node" } }
+                  total: { type: integer }
+    post:
+      summary: Сгенерировать одноразовый enrollment-токен для новой ноды (см. TZ-4 §5.2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [requested_role]
+              properties:
+                requested_role: { $ref: "#/components/schemas/NodeRole" }
+                label: { type: string, description: "Человекочитаемое имя ноды" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enrollment_token: { type: string }
+                  expires_at: { type: string, format: date-time }
+
+  /nodes/{node_id}:
+    parameters:
+      - { name: node_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Детали ноды
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+    patch:
+      summary: Изменить роль/метаданные ноды
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { $ref: "#/components/schemas/NodeRole" }
+                label: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+    delete:
+      summary: Вывести ноду из эксплуатации (DECOMMISSIONED) — см. TZ-5 §4.1
+      responses:
+        "202": { description: "Принято, переконфигурация связанных каскадов запущена асинхронно" }
+
+  /cascades:
+    get:
+      summary: Список каскадов
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Cascade" } }
+    post:
+      summary: Собрать новый каскад (входная нода + пул выходных кандидатов)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CascadeInput" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cascade" }
+
+  /cascades/{cascade_id}:
+    parameters:
+      - { name: cascade_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Детали каскада, включая текущий статус связок (для графа топологии в Admin Client)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cascade" }
+    patch:
+      summary: Изменить состав пула выходных нод-кандидатов
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CascadeInput" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cascade" }
+    delete:
+      summary: Разобрать каскад
+      responses:
+        "204": { description: OK }
+
+  /cascades/{cascade_id}/events:
+    parameters:
+      - { name: cascade_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Журнал HealthEvent по каскаду (см. TZ-5 §4.3 — "что и где отвалилось")
+      parameters:
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/HealthEvent" }
+
+  /cascades/{cascade_id}/test:
+    parameters:
+      - { name: cascade_id, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Инициировать тест-запрос по связке (см. TZ-5 §4.3, TZ-4 §3.4)
+      responses:
+        "202":
+          description: "Тест запущен асинхронно, результат — через /tests/{test_id} или WebSocket"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  test_id: { type: string }
+
+  /tests/{test_id}:
+    parameters:
+      - { name: test_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Результат конкретного тест-запроса (человекочитаемый, см. TZ-6 §3.2)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LinkTest" }
+
+  /users:
+    get:
+      summary: Список пользователей VPN
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/User" } }
+    post:
+      summary: Создать пользователя (см. TZ-5 §4.4)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, cascade_ids]
+              properties:
+                name: { type: string }
+                cascade_ids: { type: array, items: { type: string } }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+
+  /users/{user_id}:
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Детали пользователя, включая агрегированное потребление (только объём)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+    delete:
+      summary: Отозвать доступ пользователя (см. TZ-5 §4.4)
+      responses:
+        "204": { description: OK }
+
+  /usage:
+    get:
+      summary: Агрегированная статистика потребления — только байтовые счётчики (TZ-5 §6.4)
+      parameters:
+        - { name: user_id, in: query, schema: { type: string } }
+        - { name: node_id, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/UsageStat" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    TokenPair:
+      type: object
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        expires_in: { type: integer, description: "Секунды до истечения access-токена (15-30 минут, см. TZ-5 §6.3)" }
+
+    NodeRole:
+      type: string
+      enum: [entry, exit]
+
+    NodeStatus:
+      type: string
+      enum: [enrolling, healthy, degraded, down, decommissioned]
+
+    Node:
+      type: object
+      properties:
+        id: { type: string }
+        label: { type: string }
+        role: { $ref: "#/components/schemas/NodeRole" }
+        region: { type: string }
+        status: { $ref: "#/components/schemas/NodeStatus" }
+        agent_version: { type: string }
+        last_heartbeat_at: { type: string, format: date-time }
+
+    CascadeInput:
+      type: object
+      required: [entry_node_id, exit_node_ids]
+      properties:
+        entry_node_id: { type: string }
+        exit_node_ids: { type: array, items: { type: string } }
+        hop_a_presets: { type: array, items: { type: string }, description: "p1..p4, см. история пресетов в контексте проекта" }
+
+    CascadeStatus:
+      type: string
+      enum: [up, degraded, down]
+
+    Cascade:
+      type: object
+      properties:
+        id: { type: string }
+        entry_node_id: { type: string }
+        exit_node_ids: { type: array, items: { type: string } }
+        status: { $ref: "#/components/schemas/CascadeStatus" }
+        hop_a_presets: { type: array, items: { type: string } }
+
+    HealthEvent:
+      type: object
+      properties:
+        id: { type: string }
+        cascade_id: { type: string }
+        node_id: { type: string }
+        from_status: { type: string }
+        to_status: { type: string }
+        reason: { type: string }
+        occurred_at: { type: string, format: date-time }
+
+    TestOutcome:
+      type: string
+      enum: [success, container_start_failed, tls_handshake_failed, proxy_no_response, timeout]
+
+    LinkTest:
+      type: object
+      properties:
+        id: { type: string }
+        cascade_id: { type: string }
+        outcome: { $ref: "#/components/schemas/TestOutcome" }
+        latency_ms: { type: integer }
+        detail: { type: string, description: "Человекочитаемое пояснение (см. TZ-6 §3.2)" }
+        initiated_by: { type: string, description: "'admin' или 'schedule'" }
+        created_at: { type: string, format: date-time }
+
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        uuid: { type: string, description: "Личный VLESS-идентификатор пользователя, не меняется при ротации сервера" }
+        cascade_ids: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+
+    UsageStat:
+      type: object
+      description: "Только объём — намеренно нет никаких полей адреса/домена назначения (TZ-5 §6.4)"
+      properties:
+        user_id: { type: string }
+        node_id: { type: string }
+        period_start: { type: string, format: date-time }
+        uplink_bytes: { type: integer }
+        downlink_bytes: { type: integer }
+
+# --- WebSocket-канал (описан текстом, вне схемы OpenAPI 3.1) ---
+# GET /api/v1/events (Upgrade: websocket), Bearer-токен как query-параметр или Sec-WebSocket-Protocol.
+# Сообщения сервера — JSON, оборачивающие один из: HealthEvent, Cascade (обновлённый статус),
+# LinkTest (завершённый тест). Формат согласуется в первой реализации Platform (TZ-5 §7),
+# закрепляется здесь отдельным AsyncAPI-описанием, когда появится первая версия.
