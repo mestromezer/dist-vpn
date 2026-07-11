@@ -86,6 +86,28 @@ paths:
       responses:
         "204": { description: OK }
 
+  /auth/change-password:
+    post:
+      summary: >-
+        Сменить пароль текущего администратора. Обязателен к вызову, если
+        последний /auth/login вернул must_change_password=true (TZ-5 §6.3 —
+        дефолтный сгенерированный пароль требует немедленной смены).
+        Добавлено после реализации Platform, где поле already существовало
+        в ответе логина, но точки, куда вести пользователя, не было.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string }
+      responses:
+        "204": { description: "Пароль изменён, must_change_password сброшен в false" }
+        "401": { description: "current_password не совпадает" }
+
   /nodes:
     get:
       summary: Список нод пула
@@ -322,6 +344,14 @@ components:
         access_token: { type: string }
         refresh_token: { type: string }
         expires_in: { type: integer, description: "Секунды до истечения access-токена (15-30 минут, см. TZ-5 §6.3)" }
+        must_change_password:
+          type: boolean
+          description: >-
+            true, если пароль — сгенерированный при первом деплое дефолт и требует
+            немедленной смены (TZ-5 §6.3). Уточнено после реализации Platform —
+            изначально поле было только в реализации, не в контракте.
+            Admin Client обязан показать экран смены пароля, если true, и не
+            пускать дальше без вызова POST /auth/change-password.
 
     NodeRole:
       type: string
