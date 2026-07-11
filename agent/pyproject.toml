@@ -1,0 +1,35 @@
+[project]
+name = "dist-vpn-agent"
+version = "0.1.0"
+description = "Agent component of dist-vpn: control-plane gRPC client (dial-out) to Platform, local Xray/Docker management (follow-up slice)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+  "grpcio>=1.66",
+  "grpcio-tools>=1.66",
+  "docker>=7.1",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.4",
+  "python-json-logger>=2.0",
+  "pytest>=8.2",
+  "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+dist-vpn-agent = "dist_vpn_agent.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dist_vpn_agent*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+dist_vpn_agent = ["py.typed"]
