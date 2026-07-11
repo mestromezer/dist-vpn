@@ -1,0 +1,20 @@
+# Специфичные для provisioning паттерны, НЕ покрытые корневым .gitignore.
+# (vault_pass.txt / *.vault-password уже покрыты корневым .gitignore —
+# намеренно не дублируются здесь, см. TZ-7-vds-provisioning.md §2.)
+
+# Настоящий зашифрованный vault-файл с секретами — коммитим только *.example
+group_vars/all/vault.yml
+!group_vars/all/vault.yml.example
+
+# Настоящий инвентарь (реальные IP/hostname нод пула) — локальный для
+# оператора, коммитим только документированный пример.
+inventory/*.ini
+!inventory/example.ini
+
+# Локальный файл с паролем от Vault, если оператор решит хранить его файлом
+# рядом (альтернатива уже покрытым в корне vault_pass.txt/*.vault-password).
+.vault_pass
+
+# Ansible-коллекции, устанавливаемые локально через requirements.yml —
+# не хранятся в git, ставятся командой (см. README).
+collections/
