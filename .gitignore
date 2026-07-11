@@ -1,0 +1,44 @@
+# Секреты — никогда не коммитить
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!contracts/**/*.key
+vault_pass.txt
+*.vault-password
+secrets.yml
+!secrets.yml.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Node / фронтенд
+node_modules/
+dist/
+.vite/
+*.local
+
+# Сгенерированное из контрактов (регенерируется командой, не хранится в git)
+**/generated/
+**/*_pb2.py
+**/*_pb2_grpc.py
+**/*_pb2.pyi
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Ansible
+*.retry

@@ -1,0 +1,39 @@
+# dist-vpn
+
+Распределённая система управления флотом нод (Agent/Platform/Admin Client) для каскадного обхода блокировок Россия→зарубеж. Архитектура и все технические задания — в [`docs/`](docs/).
+
+## Структура репозитория
+
+| Папка | Что | ТЗ |
+|---|---|---|
+| [`docs/`](docs/) | Архитектура и технические задания (источник истины по требованиям) | — |
+| [`agent/`](agent/) | Программа Agent — ставится на каждую VDS-ноду | [TZ-4](docs/TZ-4-agent.md) |
+| [`platform/`](platform/) | Центральный сервер управления пулом | [TZ-5](docs/TZ-5-platform.md) |
+| [`admin-client/`](admin-client/) | Веб-панель администратора | [TZ-6](docs/TZ-6-admin-client.md) |
+| [`provisioning/`](provisioning/) | Ansible-плейбуки подготовки VDS | [TZ-7](docs/TZ-7-vds-provisioning.md) |
+| [`contracts/`](contracts/) | gRPC/REST контракты между компонентами — **менять только через PR** | — |
+
+## Документы (`docs/`)
+
+1. [TZ-1-rossiyskiy-vds.md](docs/TZ-1-rossiyskiy-vds.md) — критерии выбора РФ-VDS.
+2. [TZ-3-arhitektura-flota.md](docs/TZ-3-arhitektura-flota.md) — высокоуровневая архитектура (начинать чтение отсюда).
+3. [TZ-4-agent.md](docs/TZ-4-agent.md), [TZ-5-platform.md](docs/TZ-5-platform.md), [TZ-6-admin-client.md](docs/TZ-6-admin-client.md), [TZ-7-vds-provisioning.md](docs/TZ-7-vds-provisioning.md) — детальные ТЗ по каждой программе.
+
+(Нумерация ТЗ-2 в этом репозитории отсутствует — это была архитектура более ранней, уже вытесненной итерации проекта, до пивота на управляемый флот нод.)
+
+## Параллельная разработка
+
+Контракты в [`contracts/`](contracts/) зафиксированы первым коммитом именно для того, чтобы `agent/`, `platform/` и `admin-client/` можно было разрабатывать одновременно и независимо, не дожидаясь друг друга. Порядок:
+
+1. Контракты (`contracts/proto/*.proto`, `contracts/rest/openapi.yaml`) — уже есть, версия v0.1.
+2. `agent/`, `platform/`, `admin-client/`, `provisioning/` — можно начинать параллельно, каждый по своему ТЗ.
+3. Изменение контракта в процессе работы — через PR с уведомлением всех затронутых сторон (proto трогает Agent+Platform, OpenAPI — Platform+Admin Client).
+
+### Ветвление
+
+- `main` — стабильная ветка, контракты и согласованные изменения.
+- Рабочие ветки — `<component>/<короткое-описание>` (например `agent/enrollment-flow`, `platform/cascade-api`, `admin-client/topology-graph`) от `main`, слияние — через PR.
+
+## Безопасность
+
+Общие для всего репозитория требования — не хранить секреты (токены, ключи, пароли) в коде или истории git; см. конкретные меры в разделах "Требования к безопасности" каждого ТЗ и отдельно [TZ-7, §2](docs/TZ-7-vds-provisioning.md#2-требование-1-пользователя-production-ready-хранение-и-выполнение-скриптов) про хранение секретов provisioning.
