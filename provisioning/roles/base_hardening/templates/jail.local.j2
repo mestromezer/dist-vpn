@@ -1,0 +1,14 @@
+## {{ ansible_managed }}
+## Источник: roles/base_hardening (ТЗ-7 §3.3). Не редактировать вручную.
+
+[DEFAULT]
+bantime = {{ fail2ban_bantime }}
+findtime = {{ fail2ban_findtime }}
+maxretry = {{ fail2ban_maxretry }}
+
+[sshd]
+enabled = true
+port = {{ ssh_port }}
+# backend=systemd — читает journald напрямую, не зависит от наличия и формата
+# /var/log/auth.log (некоторые минимальные cloud-образы его не пишут).
+backend = systemd
