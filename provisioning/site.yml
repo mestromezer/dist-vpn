@@ -7,12 +7,15 @@
 # Роль ноды (entry|exit) — из group_vars (group_vars/entry_nodes.yml /
 # exit_nodes.yml, привязано к членству в группе инвентаря) либо явно через
 # -e role=entry|exit (extra-vars всегда приоритетнее group_vars в Ansible).
-# Используется ролями для роль-специфичного набора firewall-портов — в этом
-# слайсе список портов пуст и это ожидаемо, см. README «Scope of this
-# slice / TODO».
+# Используется ролями для роль-специфичного набора firewall-портов
+# (group_vars/entry_nodes.yml / group_vars/exit_nodes.yml — см. комментарии
+# там же за списком и обоснованием) и для AGENT_REQUESTED_ROLE, которую
+# читает контейнер Agent'а (roles/agent_install).
 #
 # SSH-хардненинг применяется ДО какой-либо иной настройки (ТЗ-7 §5) —
-# обеспечивается порядком ролей ниже (base_hardening всегда первая).
+# обеспечивается порядком ролей ниже (base_hardening всегда первая,
+# agent_install — последняя, т.к. ей нужен уже работающий Docker из
+# docker_install).
 
 - name: Базовая подготовка VDS перед установкой Agent
   hosts: vds
@@ -38,17 +41,16 @@
   roles:
     - role: base_hardening
     - role: docker_install
+    - role: agent_install
 
   post_tasks:
-    - name: "TODO (следующий слайс): установка и enrollment Agent'а"
+    - name: "Диагностика: провижининг ноды завершён"
       ansible.builtin.debug:
         msg: >-
-          Базовая подготовка ноды завершена (роль: {{ role }}). Установка
-          Docker-образа Agent'а и enrollment к Platform (ТЗ-4 §5.2, ТЗ-7
-          §4.3-4.4) — TODO следующего слайса provisioning: зависит от
-          готового Docker-образа Agent'а (параллельный, отдельный трек
-          разработки). Переменные-плейсхолдеры для этого шага
-          (agent_platform_address, agent_enrollment_token) уже
-          задокументированы в group_vars/all/vault.yml.example. Эта нода
-          пока НЕ проверяется на появление в реестре Platform со статусом
-          HEALTHY — см. README «Scope of this slice / TODO».
+          Провижининг ноды (роль: {{ role }}) завершён: базовая подготовка,
+          Docker, контейнер Agent'а запущен
+          (roles/agent_install/tasks/verify.yml подтвердил состояние
+          running). Этот playbook НЕ проверяет появление ноды в реестре
+          Platform со статусом HEALTHY (ТЗ-7 §4.4/§7) — это отдельный,
+          финальный шаг приёмки, который требует API Platform и пока не
+          реализован здесь, см. README «Scope of this slice / TODO».
