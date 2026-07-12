@@ -29,7 +29,7 @@
     comment: "SSH — base_hardening"
   when: ufw_allow_ssh | bool
 
-- name: Роль-специфичные порты поверх SSH (TODO — см. README «Scope of this slice / TODO»)
+- name: "Роль-специфичные порты поверх SSH (role={{ role | default('unknown') }})"
   community.general.ufw:
     rule: allow
     port: "{{ item.port | string }}"

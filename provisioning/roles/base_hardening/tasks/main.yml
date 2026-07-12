@@ -32,8 +32,10 @@
     msg: >-
       [{{ inventory_hostname }}] ufw: default deny incoming / allow outgoing,
       allow {{ ssh_port }}/tcp (SSH). Роль-специфичных портов открыто:
-      {{ role_ports_count }} (role={{ role | default('unknown') }}) — пусто и
-      это ожидаемо в этом слайсе, см. README «Scope of this slice / TODO».
+      {{ role_ports_count }} (role={{ role | default('unknown') }}) — см.
+      group_vars/entry_nodes.yml / group_vars/exit_nodes.yml за списком и
+      обоснованием (backhaul Hop B и control-plane mTLS-порт намеренно НЕ
+      входят сюда, см. те же файлы за причиной).
 
 - name: fail2ban — дополнительный слой поверх ufw (ТЗ-7 §3.3)
   ansible.builtin.import_tasks: fail2ban.yml

@@ -49,20 +49,19 @@ ssh_kex_algorithms:
 # --- ufw (ТЗ-7 §3.2) ---
 ufw_allow_ssh: true
 
-# Роль-специфичные allow-правила ufw ПОВЕРХ SSH — намеренно пусто в этом
-# слайсе. Порты пресетов Hop A, backhaul Hop B и mTLS-канала Agent↔Platform
-# ещё не зафиксированы (зависят от финального дизайна Agent, ТЗ-4) — открывать
-# их сейчас значило бы либо гадать, либо "открыть всё про запас", что ТЗ-7 §3.2
-# прямо запрещает. См. README → "Scope of this slice / TODO".
+# Роль-специфичные allow-правила ufw ПОВЕРХ SSH — форма единая (список
+# словарей port/proto/comment), читается по ключу текущей роли ноды
+# (roles/base_hardening/tasks/firewall.yml: role_firewall_rules[role]).
 #
-# Форма на будущее (site.yml уже параметризован role=entry|exit, механизм
-# применения — roles/base_hardening/tasks/firewall.yml, уже читает этот
-# словарь):
-#   role_firewall_rules:
-#     entry:
-#       - { port: 443, proto: tcp, comment: "Hop A preset X" }
-#     exit:
-#       - { port: 51820, proto: udp, comment: "Hop B backhaul" }
+# Значения здесь — {} по каждой роли: безопасный fallback, который сам по
+# себе ничего не открывает. РЕАЛЬНЫЕ роль-специфичные значения задаются в
+# group_vars/entry_nodes.yml / group_vars/exit_nodes.yml — group_vars имеет
+# более высокий приоритет, чем defaults роли, и полностью замещает этот
+# словарь для хоста, входящего в соответствующую группу инвентаря. См.
+# комментарии в group_vars/entry_nodes.yml и group_vars/exit_nodes.yml за
+# полным обоснованием конкретных портов (в т.ч. почему backhaul Hop B и
+# control-plane mTLS-порт по-прежнему НЕ фигурируют как allow-правила в
+# этом слайсе — это не забывчивость, см. те же комментарии).
 role_firewall_rules:
   entry: []
   exit: []
