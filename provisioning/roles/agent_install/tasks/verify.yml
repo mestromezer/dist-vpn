@@ -1,0 +1,29 @@
+---
+- name: Получить информацию о контейнере Agent'а
+  community.docker.docker_container_info:
+    name: "{{ agent_container_name }}"
+  register: agent_container_info
+
+- name: Убедиться, что контейнер Agent'а в состоянии running
+  ansible.builtin.assert:
+    that:
+      - agent_container_info.exists
+      - agent_container_info.container.State.Status == 'running'
+    fail_msg: >-
+      Контейнер {{ agent_container_name }} не в состоянии running после
+      попытки запуска. Проверьте `docker logs {{ agent_container_name }}`
+      на ноде — Agent логирует структурированные ERROR при недоступности
+      Platform или битой mTLS-конфигурации, а не тихо зависает
+      (agent/README.md, ТЗ-4 §7).
+    success_msg: "Контейнер {{ agent_container_name }} в состоянии running."
+
+- name: "Диагностика: Agent-контейнер запущен"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] Контейнер {{ agent_container_name }}
+      (образ {{ agent_effective_image }}) в состоянии running. ВАЖНО: это
+      подтверждает только то, что процесс Agent'а поднялся и не упал
+      немедленно — это НЕ то же самое, что "enrollment к Platform прошёл
+      успешно и нода появилась в реестре Platform со статусом HEALTHY"
+      (ТЗ-7 §4.4/§7) — эта проверка требует API Platform и в этом слайсе
+      не реализована, см. README «Scope of this slice / TODO».

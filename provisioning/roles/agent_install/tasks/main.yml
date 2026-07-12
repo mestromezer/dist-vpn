@@ -1,0 +1,20 @@
+---
+# Порядок: preflight (проверить входные данные) -> Docker Python-биндинги
+# (нужны модулям community.docker.*) -> образ (сборка/pull) -> mTLS-
+# материал + запуск контейнера -> проверка, что контейнер реально поднялся.
+# Применяется после docker_install (см. site.yml) -- нужен работающий Docker.
+
+- name: Preflight — проверить входные данные Agent'а (образ/vault/mTLS)
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Установить Python-биндинги Docker (нужны модулям community.docker.*)
+  ansible.builtin.import_tasks: docker_python_deps.yml
+
+- name: Получить образ Agent'а (локальная сборка либо реестр)
+  ansible.builtin.import_tasks: image.yml
+
+- name: Разложить mTLS-материал и запустить контейнер Agent'а
+  ansible.builtin.import_tasks: run.yml
+
+- name: Проверить, что контейнер Agent'а поднялся
+  ansible.builtin.import_tasks: verify.yml

@@ -4,8 +4,14 @@
 #
 # ansible.posix   -> ansible.posix.authorized_key (roles/base_hardening)
 # community.general -> community.general.ufw (roles/base_hardening)
+# community.docker  -> docker_image/docker_container/docker_container_info
+#                      (roles/agent_install) -- also needs the python3-docker
+#                      apt package on the TARGET host, installed by
+#                      roles/agent_install itself (docker-py bindings).
 collections:
   - name: ansible.posix
     version: ">=1.5.4"
   - name: community.general
     version: ">=8.0.0"
+  - name: community.docker
+    version: ">=3.4.0"

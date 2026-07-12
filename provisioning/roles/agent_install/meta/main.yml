@@ -1,0 +1,28 @@
+---
+galaxy_info:
+  role_name: agent_install
+  description: >-
+    Установка и запуск Agent'а как Docker-контейнера на уже подготовленной
+    (base_hardening + docker_install) VDS: control-plane gRPC-клиент к
+    Platform (см. agent/README.md, ветка agent/grpc-client-skeleton),
+    адрес Platform и одноразовый enrollment-токен передаются через Ansible
+    Vault, никогда как plaintext. См. docs/TZ-7-vds-provisioning.md §4.3,
+    docs/TZ-4-agent.md §5.
+  license: proprietary
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
+  galaxy_tags:
+    - docker
+    - agent
+# Явных Ansible-зависимостей (meta/main.yml dependencies) нет — порядок
+# применения (после docker_install) обеспечивается порядком ролей в
+# site.yml, тем же способом, что и у остальных ролей этого проекта.
+dependencies: []
