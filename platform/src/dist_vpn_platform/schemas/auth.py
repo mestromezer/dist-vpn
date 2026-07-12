@@ -15,6 +15,20 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LogoutRequest(BaseModel):
+    # Optional per this slice's reading of the contract gap (see platform/README.md
+    # "Отклонения от ТЗ" #2) - if omitted, we still revoke on a best-effort basis by
+    # doing nothing token-specific (there is no session-id to fall back to without a
+    # server-side session pointer, which this design deliberately doesn't have - see
+    # the same README note). Passing it is what actually revokes something.
+    refresh_token: str | None = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class TokenPairResponse(BaseModel):
     access_token: str
     refresh_token: str

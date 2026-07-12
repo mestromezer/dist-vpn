@@ -18,6 +18,7 @@ from dist_vpn_platform.config import settings
 from dist_vpn_platform.models.admin_account import AdminAccount
 from dist_vpn_platform.models.base import as_aware_utc
 from dist_vpn_platform.models.refresh_token import RefreshToken
+from dist_vpn_platform.security.passwords import hash_password, verify_password
 from dist_vpn_platform.security.tokens import TokenError, TokenType, create_access_token, create_refresh_token, decode_token
 
 logger = logging.getLogger(__name__)
@@ -105,9 +106,15 @@ async def rotate_refresh_token(session: AsyncSession, presented_refresh_token: s
     return new_pair
 
 
-async def revoke_refresh_token(session: AsyncSession, presented_refresh_token: str) -> None:
+async def revoke_refresh_token(session: AsyncSession, presented_refresh_token: str | None) -> None:
     """Used by /auth/logout - revokes just the presented token's row (not idempotent
-    failure-free: an already-invalid token is treated as already logged out)."""
+    failure-free: an already-invalid token is treated as already logged out). A `None`
+    token (contract now allows an optional body - see api/routes/auth.py) is a no-op:
+    there is no server-side session pointer to fall back to (see platform/README.md
+    "Отклонения от ТЗ" #2), so logout without a refresh_token just ends the caller's
+    bearer-authenticated request without revoking anything token-specific."""
+    if presented_refresh_token is None:
+        return
     try:
         decoded = decode_token(presented_refresh_token, expected_type=TokenType.REFRESH)
     except TokenError:
@@ -117,6 +124,34 @@ async def revoke_refresh_token(session: AsyncSession, presented_refresh_token: s
     if row is not None and row.revoked_at is None:
         row.revoked_at = datetime.now(timezone.utc)
         await session.flush()
+
+
+async def change_password(session: AsyncSession, admin: AdminAccount, *, current_password: str, new_password: str) -> None:
+    """POST /auth/change-password: verify `current_password` (Argon2id), set the new
+    hash, clear `must_change_password` (TZ-5 §6.3 - "обязательная смена дефолтного
+    пароля при первом входе"), and revoke every outstanding refresh-token family for
+    this admin so a credential change actually ends any already-issued sessions
+    (same rationale as the theft-detection family-revocation in rotate_refresh_token
+    above - a password change is exactly the kind of event that should invalidate
+    long-lived refresh tokens, not just future logins).
+
+    Raises AuthError (-> 401, per the task's "Return 401 on mismatch") if
+    `current_password` doesn't match.
+    """
+    if not verify_password(current_password, admin.password_hash):
+        raise AuthError("current password is incorrect")
+
+    admin.password_hash = hash_password(new_password)
+    admin.must_change_password = False
+
+    result = await session.execute(
+        select(RefreshToken).where(RefreshToken.admin_id == admin.id, RefreshToken.revoked_at.is_(None))
+    )
+    now = datetime.now(timezone.utc)
+    for row in result.scalars():
+        row.revoked_at = now
+
+    await session.flush()
 
 
 async def _revoke_family(session: AsyncSession, family_id: str) -> None:
