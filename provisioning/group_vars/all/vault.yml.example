@@ -32,16 +32,21 @@ ansible_become_password: "CHANGE_ME_generate_with_openssl_rand_-base64_24"
 # (или mkpasswd --method=sha-512 из пакета whois на Debian/Ubuntu)
 vault_provision_user_password_hash: "$6$CHANGE_ME$replace_with_a_real_sha512_crypt_hash"
 
-# --- Плейсхолдеры следующего слайса (не используются ни одной задачей этого
-# слайса — ни один playbook/роль сейчас их не читает; задел под будущую роль
-# agent_install, см. ТЗ-4 §5.2 и README «Scope of this slice / TODO») ---
+# --- Используются roles/agent_install (ТЗ-4 §5.2, ТЗ-7 §4.3) — эти два
+# значения читаются напрямую под этими же именами (roles/agent_install/
+# tasks/preflight.yml проверяет, что оба заданы и не остались CHANGE_ME-
+# плейсхолдером; roles/agent_install/tasks/run.yml передаёт их в контейнер
+# как AGENT_PLATFORM_ADDRESS / AGENT_ENROLLMENT_TOKEN через Docker Engine
+# API, не через -e/аргумент командной строки — см. README) ---
 
 # Адрес Platform, к которому Agent должен подключиться при enrollment'е.
+# Соответствует env-переменной AGENT_PLATFORM_ADDRESS (agent/README.md).
 agent_platform_address: "CHANGE_ME_platform.example.internal:PORT"
 
 # Одноразовый enrollment-токен Agent'а (ТЗ-4 §5.2) — выдаётся Platform,
 # используется один раз при первом запуске контейнера Agent'а, после выдачи
 # mTLS-сертификата токен становится бесполезен. Никогда не передавать этот
 # токен как обычную (незашифрованную) -e переменную или в команде оболочки —
-# только через это Vault-значение.
+# только через это Vault-значение. Соответствует env-переменной
+# AGENT_ENROLLMENT_TOKEN (agent/README.md).
 agent_enrollment_token: "CHANGE_ME_one_time_token_from_platform"
