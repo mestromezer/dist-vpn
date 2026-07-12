@@ -94,6 +94,33 @@ class AgentSettings(BaseSettings):
     # supply real mTLS material instead.
     insecure_dev_mode: bool = Field(default=False)
 
+    # --- Local Xray-core control API (xray_client.py) ---
+    # Loopback address of the Xray-core container's own gRPC API
+    # (HandlerService/RoutingService/StatsService, TZ-4 SS3.2) -- NOT the
+    # Agent<->Platform channel above. This is a purely local, same-host
+    # (or same Docker network namespace) connection; it is never exposed
+    # externally, so it does not carry the mTLS requirements that apply to
+    # platform_address (see xray_client.py for why plaintext loopback here
+    # is not the same risk as insecure_dev_mode).
+    xray_api_address: str = Field(
+        default="127.0.0.1:10085",
+        description="host:port of the local Xray-core gRPC API (loopback only).",
+    )
+
+    # --- Local Xray-core Docker container (docker_manager.py) ---
+    xray_docker_image: str = Field(
+        default="ghcr.io/xtls/xray-core:latest",
+        description="Image (with tag) to run/create the local Xray-core container from.",
+    )
+    xray_container_name: str = Field(
+        default="dist-vpn-xray-core",
+        description="Name of the Xray-core container this Agent manages (only this container is ever touched, TZ-4 SS5.4).",
+    )
+    xray_config_host_path: Path = Field(
+        default=Path("/etc/dist-vpn/xray-config.json"),
+        description="Host path mounted read-only into the container as /etc/xray/config.json.",
+    )
+
     # --- Logging ---
     log_level: str = Field(default="INFO")
 
