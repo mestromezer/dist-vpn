@@ -16,12 +16,13 @@ Design constraints from TZ-4, followed here:
 - No secret (enrollment token, certificate/key material) is ever logged in
   full (SS5.3).
 
-Scope of *this* slice: enrollment, heartbeat, ping handling, and echoing a
-"not implemented" ``CommandResult`` back for any ``Command`` so the full
-contract round-trip is exercised end-to-end. Actually dispatching commands to
-the local Xray-core, real Docker/Xray health data, and persisting/rotating
-the mTLS certificate issued via ``EnrollmentAck`` are out of scope here --
-see agent/README.md "Scope of this slice" for the complete list.
+Scope of *this* slice: enrollment, heartbeat, ping handling, and real
+dispatch of six ``Command`` operations to the local Xray-core via
+``xray_client.py`` (add/remove inbound/outbound, add/remove user,
+add/remove routing rule, override balancer) -- see ``_COMMAND_DISPATCH``
+below. ``run_test`` and ``rotate_secret`` remain unimplemented (see
+agent/README.md "Scope of this slice" for why), and persisting/rotating the
+mTLS certificate issued via ``EnrollmentAck`` is still out of scope here.
 """
 
 from __future__ import annotations
@@ -30,14 +31,44 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Awaitable, Callable
 
 import grpc
 
 from dist_vpn_agent.config import AgentSettings, NodeRole, mask_secret
 from dist_vpn_agent.generated import agent_control_pb2 as pb2
 from dist_vpn_agent.generated import agent_control_pb2_grpc as pb2_grpc
+from dist_vpn_agent.xray_client import XrayClient, XrayClientError
 
 logger = logging.getLogger(__name__)
+
+# Maps a Command.op oneof field name to a function that carries it out
+# against a real, local Xray-core (see xray_client.py and TZ-4 SS3.2's
+# operation-to-Xray-RPC table). Deliberately does NOT include "run_test" or
+# "rotate_secret" -- see agent/README.md "Scope of this slice" for why those
+# two remain unimplemented; any op not present here falls through to the
+# NotImplementedError branch in _handle_command below.
+_COMMAND_DISPATCH: dict[str, Callable[[XrayClient, pb2.Command], Awaitable[None]]] = {
+    "add_inbound": lambda client, cmd: client.add_inbound(cmd.add_inbound.inbound_json),
+    "remove_inbound": lambda client, cmd: client.remove_inbound(cmd.remove_inbound.tag),
+    "add_outbound": lambda client, cmd: client.add_outbound(cmd.add_outbound.outbound_json),
+    "remove_outbound": lambda client, cmd: client.remove_outbound(cmd.remove_outbound.tag),
+    "add_user": lambda client, cmd: client.add_user(
+        cmd.add_user.inbound_tag, cmd.add_user.uuid, cmd.add_user.email, cmd.add_user.flow
+    ),
+    "remove_user": lambda client, cmd: client.remove_user(
+        cmd.remove_user.inbound_tag, cmd.remove_user.email
+    ),
+    "add_routing_rule": lambda client, cmd: client.add_routing_rule(
+        cmd.add_routing_rule.rule_tag, cmd.add_routing_rule.rule_json
+    ),
+    "remove_routing_rule": lambda client, cmd: client.remove_routing_rule(
+        cmd.remove_routing_rule.rule_tag
+    ),
+    "override_balancer": lambda client, cmd: client.override_balancer(
+        cmd.override_balancer.balancer_tag, cmd.override_balancer.target_outbound_tag
+    ),
+}
 
 _ROLE_TO_PROTO: dict[NodeRole, int] = {
     NodeRole.UNSPECIFIED: pb2.NODE_ROLE_UNSPECIFIED,
@@ -69,10 +100,14 @@ class ControlClient:
     token again).
     """
 
-    def __init__(self, settings: AgentSettings) -> None:
+    def __init__(self, settings: AgentSettings, xray_client: XrayClient | None = None) -> None:
         self._settings = settings
         self.node_id: str | None = None
         self._node_id_event = asyncio.Event()
+        # Overridable for tests (point it at an in-process mock Xray-core,
+        # see tests/mock_xray_server.py); defaults to the real local
+        # Xray-core loopback address from settings.
+        self._xray_client = xray_client if xray_client is not None else XrayClient(settings.xray_api_address)
 
     # -- channel / credentials -------------------------------------------------
 
@@ -186,21 +221,53 @@ class ControlClient:
             logger.debug("received ping timestamp_unix=%s", message.ping.timestamp_unix)
 
         elif kind == "command":
-            cmd = message.command
-            op = cmd.WhichOneof("op")
-            logger.info("received command id=%s op=%s, dispatch not yet implemented in this slice", cmd.command_id, op)
-            await outbound.put(
-                pb2.AgentMessage(
-                    command_result=pb2.CommandResult(
-                        command_id=cmd.command_id,
-                        success=False,
-                        error_message="not implemented in this slice",
-                    )
-                )
-            )
+            await self._handle_command(message.command, outbound)
 
         else:
             logger.warning("received PlatformMessage with no payload set")
+
+    async def _handle_command(
+        self, cmd: pb2.Command, outbound: "asyncio.Queue[pb2.AgentMessage | None]"
+    ) -> None:
+        """Dispatch one ``Command`` to the local Xray-core (via
+        ``xray_client.py``) and report back a real ``CommandResult`` --
+        never the placeholder "not implemented" echo from the previous
+        slice, except for the two ops genuinely not built yet (``run_test``,
+        ``rotate_secret``; see agent/README.md).
+
+        Any failure -- a real ``grpc.RpcError`` from Xray, a request-
+        translation error (``XrayClientError``), or something unexpected --
+        is logged (never swallowed silently) and turned into
+        ``CommandResult(success=False, error_message=...)`` so Platform sees
+        exactly what went wrong, not just a generic failure.
+        """
+        op = cmd.WhichOneof("op")
+        handler = _COMMAND_DISPATCH.get(op)
+
+        try:
+            if handler is None:
+                raise NotImplementedError(
+                    f"Command op {op!r} is not implemented in this slice (see agent/README.md "
+                    "'Scope of this slice')"
+                )
+            await handler(self._xray_client, cmd)
+        except (XrayClientError, NotImplementedError) as err:
+            logger.error("command id=%s op=%s failed: %s", cmd.command_id, op, err)
+            result = pb2.CommandResult(command_id=cmd.command_id, success=False, error_message=str(err))
+        except Exception:  # noqa: BLE001 - last-resort guard so one bad command can't kill the session
+            logger.exception(
+                "command id=%s op=%s failed with an unexpected internal error", cmd.command_id, op
+            )
+            result = pb2.CommandResult(
+                command_id=cmd.command_id,
+                success=False,
+                error_message=f"unexpected internal Agent error handling {op}",
+            )
+        else:
+            logger.info("command id=%s op=%s succeeded", cmd.command_id, op)
+            result = pb2.CommandResult(command_id=cmd.command_id, success=True)
+
+        await outbound.put(pb2.AgentMessage(command_result=result))
 
     # -- loops -------------------------------------------------------------------
 
@@ -258,8 +325,10 @@ class ControlClient:
         This is what gives the Agent its "restart-safe" property at the
         transport level (TZ-4 SS3.1/SS4): a transient network partition or
         Platform restart causes a reconnect, not a crash. Full declarative
-        reconciliation on reconnect (re-fetching desired Xray state) is out
-        of scope for this slice -- there is no Xray control yet.
+        reconciliation on reconnect (Platform re-pushing the complete desired
+        Xray state after a gap, rather than the Agent only reacting to
+        Commands it happens to receive) is still out of scope for this
+        slice -- see agent/README.md.
         """
         backoff = self._settings.reconnect_backoff_initial_seconds
         while True:
