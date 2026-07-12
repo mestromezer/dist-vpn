@@ -24,3 +24,6 @@ class UserOut(BaseModel):
 
 class UserListResponse(BaseModel):
     items: list[UserOut]
+    # Additive field - see the identical note on CascadeListResponse.total
+    # (schemas/cascades.py) for why this isn't literally in openapi.yaml yet.
+    total: int
