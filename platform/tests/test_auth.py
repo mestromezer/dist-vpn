@@ -104,3 +104,86 @@ async def test_logout_revokes_refresh_token(client: AsyncClient, seeded_admin: d
 
     refresh_after_logout = await client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
     assert refresh_after_logout.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_logout_without_body_is_accepted(client: AsyncClient, seeded_admin: dict) -> None:
+    # contracts/rest/openapi.yaml's /auth/logout has no requestBody at all (v0.1 draft
+    # gap); this slice makes the refresh_token body optional rather than required -
+    # a bare POST with only the bearer token must still succeed (see
+    # api/routes/auth.py, schemas/auth.py LogoutRequest).
+    login_response = await client.post(
+        "/auth/login", json={"username": seeded_admin["username"], "password": seeded_admin["password"]}
+    )
+    access_token = login_response.json()["access_token"]
+
+    logout_response = await client.post(
+        "/auth/logout", headers={"Authorization": f"Bearer {access_token}"}
+    )
+    assert logout_response.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_change_password_success_clears_must_change_password_and_revokes_sessions(
+    client: AsyncClient, seeded_admin: dict
+) -> None:
+    login_response = await client.post(
+        "/auth/login", json={"username": seeded_admin["username"], "password": seeded_admin["password"]}
+    )
+    tokens = login_response.json()
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    change_response = await client.post(
+        "/auth/change-password",
+        json={"current_password": seeded_admin["password"], "new_password": "New-Correct-Horse-42"},
+        headers=headers,
+    )
+    assert change_response.status_code == 204
+
+    # The old refresh token (issued before the password change) must now be revoked -
+    # a credential change ends previously-issued sessions (see
+    # security/auth_service.py::change_password).
+    stale_refresh = await client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert stale_refresh.status_code == 401
+
+    # Old password no longer works; new password does, and must_change_password is
+    # now False (it was already False for seeded_admin, but this proves the write path).
+    old_password_login = await client.post(
+        "/auth/login", json={"username": seeded_admin["username"], "password": seeded_admin["password"]}
+    )
+    assert old_password_login.status_code == 401
+
+    new_password_login = await client.post(
+        "/auth/login", json={"username": seeded_admin["username"], "password": "New-Correct-Horse-42"}
+    )
+    assert new_password_login.status_code == 200
+    assert new_password_login.json()["must_change_password"] is False
+
+
+@pytest.mark.asyncio
+async def test_change_password_wrong_current_password_is_401(client: AsyncClient, seeded_admin: dict) -> None:
+    login_response = await client.post(
+        "/auth/login", json={"username": seeded_admin["username"], "password": seeded_admin["password"]}
+    )
+    headers = {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+    response = await client.post(
+        "/auth/change-password",
+        json={"current_password": "totally-wrong", "new_password": "New-Correct-Horse-42"},
+        headers=headers,
+    )
+    assert response.status_code == 401
+
+    # The password must be unchanged - the original still logs in.
+    still_works = await client.post(
+        "/auth/login", json={"username": seeded_admin["username"], "password": seeded_admin["password"]}
+    )
+    assert still_works.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_change_password_requires_authentication(client: AsyncClient, db_engine: None) -> None:
+    response = await client.post(
+        "/auth/change-password", json={"current_password": "x", "new_password": "y"}
+    )
+    assert response.status_code == 401

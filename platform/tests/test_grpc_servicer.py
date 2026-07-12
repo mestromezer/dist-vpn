@@ -16,6 +16,8 @@ from dist_vpn_platform.grpc_server.servicer import AgentControlServicer
 from dist_vpn_platform.models.enrollment_token import EnrollmentToken
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
+from dist_vpn_platform.models.usage_stat import UsageStat
+from dist_vpn_platform.models.user import User
 from dist_vpn_platform.security.enrollment_tokens import generate_token, hash_token
 
 
@@ -116,3 +118,55 @@ async def test_heartbeat_transitions_enrolling_to_healthy(db_engine: None) -> No
         assert len(events) == 1
         assert events[0].from_status == "enrolling"
         assert events[0].to_status == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_telemetry_persists_usage_stats_and_resolves_known_user(db_engine: None) -> None:
+    plaintext = await _seed_enrollment_token()
+    servicer = AgentControlServicer()
+    ack = await servicer._handle_enrollment(
+        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY), peer="test-peer"
+    )
+
+    async with session_scope() as db:
+        user = User(name="dave")
+        db.add(user)
+        await db.flush()
+        user_uuid = user.uuid
+
+    timestamp = int(datetime(2026, 7, 12, 10, 30, tzinfo=timezone.utc).timestamp())
+    await servicer._handle_telemetry(
+        pb.TelemetryReport(
+            node_id=ack.node_id,
+            timestamp_unix=timestamp,
+            counters=[
+                pb.UsageCounter(scope="user", key=user_uuid, uplink_bytes=1000, downlink_bytes=2000),
+                pb.UsageCounter(scope="inbound", key="hopa-in-test", uplink_bytes=50, downlink_bytes=60),
+            ],
+        )
+    )
+    # A second report in the same hourly bucket must accumulate, not duplicate rows.
+    await servicer._handle_telemetry(
+        pb.TelemetryReport(
+            node_id=ack.node_id,
+            timestamp_unix=timestamp + 60,
+            counters=[pb.UsageCounter(scope="user", key=user_uuid, uplink_bytes=100, downlink_bytes=200)],
+        )
+    )
+
+    async with session_scope() as db:
+        rows = (await db.execute(select(UsageStat).where(UsageStat.node_id == ack.node_id))).scalars().all()
+        by_scope = {row.scope: row for row in rows}
+
+        assert len(rows) == 2  # one per scope/key, accumulated - not one per report
+
+        user_row = by_scope["user"]
+        assert user_row.raw_key == user_uuid
+        assert user_row.user_id == (await db.execute(select(User.id).where(User.uuid == user_uuid))).scalar_one()
+        assert user_row.uplink_bytes == 1100
+        assert user_row.downlink_bytes == 2200
+
+        inbound_row = by_scope["inbound"]
+        assert inbound_row.user_id is None
+        assert inbound_row.uplink_bytes == 50
+        assert inbound_row.downlink_bytes == 60
