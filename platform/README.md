@@ -4,11 +4,13 @@
 
 Кратко: Python 3.12+, FastAPI + SQLAlchemy 2.0 (async) + Alembic + PostgreSQL, ARQ для фоновых задач (пока не подключён — см. "Scope of this slice / TODO"), gRPC-сервер к Agent'ам по контракту [`../contracts/proto/agent_control.proto`](../contracts/proto/agent_control.proto), REST/WebSocket API для Admin Client по контракту [`../contracts/rest/openapi.yaml`](../contracts/rest/openapi.yaml).
 
-Текущая ветка (`platform/api-skeleton`) — первый слайс: рабочий REST + gRPC каркас с полноценной аутентификацией администратора и enrollment-циклом ноды из §9 критериев приёмки. Остальное — см. раздел TODO ниже.
+Текущая ветка (`platform/api-skeleton`) — второй слайс: к REST+gRPC каркасу первого слайса (аутентификация администратора, enrollment-цикл ноды) добавлены реальный command dispatch Platform→Agent, сборка каскадов, управление пользователями VPN и приём телеметрии. Остальное — см. раздел TODO ниже.
 
 ---
 
-## Что это делает (этот слайс)
+## Что это делает
+
+### Первый слайс (аутентификация администратора, реестр нод)
 
 - REST API (`/api/v1/...`) на FastAPI: вход/обновление токена администратора, CRUD пула нод (список, выпуск enrollment-токена, детали/патч/вывод из эксплуатации).
 - gRPC-сервер (`AgentControl.Session`, bidi-streaming) — принимает enrollment новых Agent'ов по одноразовому токену, обрабатывает heartbeat (перевод `ENROLLING → HEALTHY`, журналирование переходов в `HealthEvent`).
@@ -17,7 +19,15 @@
 - Структурированное JSON-логирование с редактированием секретов.
 - `docker-compose.yml` для локальной разработки (Postgres + сам сервис).
 
-Остальные эндпоинты контракта (`/cascades/*`, `/users/*`, `/usage`, `/tests/{id}`, `WS /events`) объявлены в роутере (видна форма контракта), но возвращают `501 Not Implemented` с явным `# TODO` — см. ниже.
+### Второй слайс (этот слайс)
+
+- **Живой command dispatch Platform → Agent** (`grpc_server/servicer.py`) — `SessionRegistry` держит очередь ("outbox") на каждый подключённый bidi-стрим Agent'а, keyed по `node_id`; `dispatch_command(node_id, command)` кладёт `Command` в эту очередь и дожидается соответствующего `CommandResult`/`TestResult`, коррелируя по `command_id`/`test_id` через словарь `asyncio.Future`. Раньше это было заглушкой (`raise NotImplementedError`) — теперь реальный механизм, покрытый `tests/test_grpc_dispatch.py`.
+- **`POST /cascades`** — валидирует существование entry/exit нод, сохраняет `Cascade`+`CascadeExitNode`, реально рассылает `AddInbound`/`AddOutbound`/`AddRoutingRule` затронутым Agent'ам (см. "Отклонения от ТЗ" про происхождение JSON-формы). **`DELETE /cascades/{id}`** — рассылает `Remove*` и удаляет строки. **`GET /cascades`/`GET /cascades/{id}`** — реальное состояние с полем `total`. Dispatch — best-effort (`api/command_dispatch.py`): офлайн-нода не роняет HTTP-запрос, а отражается в `Cascade.status` (`up`/`degraded`/`down`).
+- **`POST /users`** — создаёт `User` (id/uuid генерируются сервером), рассылает `AddUser` на entry-ноду каждого каскада, к которому дан доступ. **`DELETE /users/{id}`** — рассылает `RemoveUser`, помечает пользователя отозванным. **`GET /users`/`GET /users/{id}`** — реальное состояние с полем `total`.
+- **`POST /auth/change-password`** — проверяет `current_password` (Argon2id), задаёт новый хеш, сбрасывает `must_change_password`, отзывает все текущие refresh-токены администратора. 401 при несовпадении пароля.
+- **Приём телеметрии** — `TelemetryReport.counters` реально пишется в `UsageStat` (почасовые бакеты, накопление, а не по строке на отчёт), `scope="user"` резолвится в `User.id` по `uuid`.
+
+Остальные эндпоинты контракта (`PATCH /cascades/{id}`, `GET /cascades/{id}/events`, `POST /cascades/{id}/test`, `GET /tests/{id}`, `GET /usage`, `WS /events`) по-прежнему объявлены в роутере, но возвращают `501 Not Implemented` с явным `# TODO` — см. ниже.
 
 ---
 
@@ -104,12 +114,15 @@ python -m dist_vpn_platform.main
 pytest -q
 ```
 
-**16/16 тестов проходят.** Тесты используют `aiosqlite` (файловая SQLite-БД, создаётся и удаляется на каждый тест — см. `tests/conftest.py`), а не PostgreSQL — потому что не в каждом окружении, где может запускаться этот набор тестов, гарантированно доступен Postgres, а модели используют только переносимые типы SQLAlchemy (`String`/`DateTime`/`JSON`/`Enum(..., native_enum=False)` — см. `models/base.py::sa_enum`) специально ради этого. **В production используется исключительно PostgreSQL** (ТЗ-5 §2) — сама Alembic-миграция проверена отдельно против реального Postgres (см. раздел "Миграции" выше), тесты pytest проверяют слой приложения/ORM, а не DDL.
+**38/38 тестов проходят.** Тесты используют `aiosqlite` (файловая SQLite-БД, создаётся и удаляется на каждый тест — см. `tests/conftest.py`), а не PostgreSQL — потому что не в каждом окружении, где может запускаться этот набор тестов, гарантированно доступен Postgres, а модели используют только переносимые типы SQLAlchemy (`String`/`DateTime`/`JSON`/`Enum(..., native_enum=False)` — см. `models/base.py::sa_enum`) специально ради этого. **В production используется исключительно PostgreSQL** (ТЗ-5 §2) — сама Alembic-миграция проверена отдельно против реального Postgres (см. раздел "Миграции" выше), тесты pytest проверяют слой приложения/ORM, а не DDL.
 
 Состав:
-- `tests/test_auth.py` — успешный/неуспешный вход, per-IP rate limiting (429 после порога), per-account lockout, ротация refresh-токена + отказ при повторном использовании (theft detection), logout.
+- `tests/test_auth.py` — успешный/неуспешный вход, per-IP rate limiting (429 после порога), per-account lockout, ротация refresh-токена + отказ при повторном использовании (theft detection), logout (с телом и без), `POST /auth/change-password` (успех + отзыв старых refresh-токенов, неверный текущий пароль → 401, требует аутентификации).
 - `tests/test_nodes.py` — список нод (пустой пул, авторизация обязательна), выпуск enrollment-токена, полный цикл GET/PATCH/DELETE ноды, 404 на несуществующую ноду.
-- `tests/test_grpc_servicer.py` — unit-тесты обработчика gRPC (`Enrollment`/`Heartbeat`) напрямую (без реального gRPC-канала — сама транспортная часть сгенерирована `grpcio-tools`): валидный/невалидный/повторно использованный токен, переход `ENROLLING → HEALTHY` по heartbeat с записью `HealthEvent`.
+- `tests/test_grpc_servicer.py` — unit-тесты обработчика gRPC (`Enrollment`/`Heartbeat`/`TelemetryReport`) напрямую (без реального gRPC-канала — сама транспортная часть сгенерирована `grpcio-tools`): валидный/невалидный/повторно использованный токен, переход `ENROLLING → HEALTHY` по heartbeat с записью `HealthEvent`, накопление `UsageStat` по часовым бакетам с резолвом `user_id`.
+- `tests/test_grpc_dispatch.py` — live command dispatch: открывает фейковый `Session`-стрим (`tests/grpc_test_helpers.py`), проверяет, что `Command`, отправленный через `dispatch_command()`, реально приходит в этот стрим, а присланный в ответ `CommandResult` резолвит ожидающий `asyncio.Future`; отдельно — `NodeNotConnectedError` для неизвестной ноды и таймаут для неотвечающего Agent'а.
+- `tests/test_cascades.py` — `POST /cascades` реально диспатчит `AddInbound`/`AddOutbound`/`AddRoutingRule` подключённым фейковым Agent'ам (`tests/grpc_test_helpers.py::FakeAgent`) и возвращает `status: up`; офлайн exit-нода → `status: degraded`; несуществующая entry-нода → 404; `DELETE` диспатчит `Remove*` и удаляет запись; `total` в списке.
+- `tests/test_users.py` — `POST /users` генерирует `id`/`uuid` на сервере и диспатчит `AddUser` на entry-ноду каскада; `DELETE` диспатчит `RemoveUser` и помечает пользователя отозванным (`cascade_ids` пустеет); 404 на несуществующий каскад/пользователя.
 
 ---
 
@@ -155,10 +168,15 @@ platform/
 ## Отклонения от ТЗ / контракта (задокументировано, не молчком)
 
 1. **Две служебные сущности сверх списка ТЗ-5 §3**: `EnrollmentToken` (нужна для одноразовых токенов enrollment, ТЗ-5 §4.1/§6.2 — контракт `POST /nodes` явно требует такое поведение) и `RefreshToken` (нужна как deny-list/хранилище для ротации JWT-refresh, ТЗ-5 §6.3). Обе — инфраструктурные детали реализации существующих функциональных требований, а не новые продуктовые сущности; не заменяют и не меняют смысл ни одной из 8 сущностей ТЗ-5 §3.
-2. **`POST /auth/logout` в `contracts/rest/openapi.yaml` не имеет `requestBody`** — в спеке (v0.1, черновик) описание "Отзыв текущего refresh-токена" не уточняет, как этот токен передаётся. Реализовано: требуется bearer access-токен (наследуется от глобального `security: bearerAuth`, путь его не переопределяет) **и** тело `{"refresh_token": "..."}` — иначе у stateless JWT-access-токена нет способа однозначно определить, какой именно refresh-токен отозвать. Контракт не менялся (файл не тронут) — это зона, требующая уточнения на PR-ревью между Platform и Admin Client командами.
-3. **`TokenPair` в ответе `/auth/login`/`/auth/refresh` содержит дополнительное поле `must_change_password`**, которого нет в `components/schemas/TokenPair` в `openapi.yaml`. Это аддитивное расширение (схема не помечена `additionalProperties: false`, так что это обратно совместимо) — добавлено, чтобы поддержать требование ТЗ-5 §6.3 "обязательная смена дефолтного пароля при первом входе" уже сейчас, до появления отдельного эндпоинта смены пароля (которого пока нет в контракте — см. TODO ниже).
-4. **mTLS между Agent↔Platform (ТЗ-5 §6.2) не реализован** — gRPC-сервер поднят на `insecure_server_credentials`, `EnrollmentAck.mtls_client_cert_pem` всегда пустой. Явно указано в задании как допустимое для этого слайса ("validate a fake/seeded enrollment token for now"); интеграция со `step-ca` — отдельная работа, требующая своего PKI-поднятия, вне рамок api-skeleton.
-5. **TOTP/MFA (ТЗ-5 §6.3)**: реализована только верификация (`security/totp.py`, поле `AdminAccount.totp_enabled`/`totp_secret`, проверка кода при входе, если включена). Провижининг нового секрета (QR-код и т.п.) не реализован — в `contracts/rest/openapi.yaml` нет эндпоинта для этого; дефолтный администратор сидируется с `totp_enabled=False`. Задача была явно сформулирована как "implement the baseline: Argon2id, JWT rotation, rate limiting" — MFA сверх этого сделана насколько дёшево вписывалась, но полный флоу — TODO.
+2. **`POST /auth/logout` в `contracts/rest/openapi.yaml` по-прежнему не имеет `requestBody`** — не изменилось со времени первого слайса (см. git-историю файла: единственный коммит, когда-либо трогавший `openapi.yaml`, — это черновик v0.1, `dd6e7f6`). Реализовано: bearer access-токен обязателен (глобальный `security: bearerAuth`) **плюс необязательное тело `{"refresh_token": "..."}`** — если тело не передано, `POST /auth/logout` всё равно возвращает 204 (просто ничего не отзывает — токен без `session_id` не может быть найден иначе, см. `security/auth_service.py::revoke_refresh_token`). Контракт не менялся.
+3. **`TokenPair` в ответе `/auth/login`/`/auth/refresh` содержит дополнительное поле `must_change_password`** — аддитивное расширение (схема не `additionalProperties: false`), как и раньше; теперь реально используется: `POST /auth/change-password` (новый эндпоинт, тоже отсутствующий в `openapi.yaml`) его сбрасывает.
+4. **⚠️ Важная проверка перед этим слайсом: контракт `contracts/rest/openapi.yaml` НЕ менялся с первого слайса.** Задание на этот слайс утверждало, что список-ответы `/cascades` и `/users` "уже требуют" поле `total`, что появился `POST /auth/change-password`, и что `TokenPair` "уже содержит" `must_change_password` в контракте, и что `/auth/logout` "уже принимает" опциональный `refresh_token`. Проверка `git log --oneline -- contracts/rest/openapi.yaml` показывает ровно один коммит (`dd6e7f6`, исходный черновик v0.1) — **ничего из перечисленного в файле нет и не появлялось**. Это расхождение зафиксировано, а не тихо принято на веру или тихо исправлено в контракте: сам `contracts/rest/openapi.yaml` в этом слайсе не тронут (см. правило "flag it, don't fix it" в задании). Ниже описанные `total`/`change-password`/опциональный `refresh_token` реализованы как аддитивные расширения Platform-стороны (тот же паттерн, что и `must_change_password` в п.3), а не как отражение уже существующего контракта — если Admin Client команда действительно рассчитывает на эти поля/эндпоинт, контракт нужно обновить отдельным PR.
+5. **`CascadeListResponse`/`UserListResponse` содержат `total`**, которого нет в inline-схемах `/cascades`/`/users` в `openapi.yaml` (см. п.4) — добавлено для симметрии с `/nodes`, где `total` в контракте уже есть.
+6. **`POST /auth/change-password`** — целиком новый путь, отсутствующий в `openapi.yaml` (см. п.4). 401 при неверном `current_password`, 204 при успехе, отзывает все текущие refresh-токены администратора.
+7. **Xray inbound/outbound/routing-rule JSON — не буквальная копия ранее проверенной конфигурации** (`services/xray_templates.py`). ТЗ-3 §0 говорит, что конкретные P1-P4 шаблоны и точная форма `balancer`/`observatory`/`fallbackTag` были "проверены ранее в проекте", но физически утрачены при сбое диска до появления этого репозитория — сохранилось только текстовое описание полей (ТЗ-3 §0: `realitySettings`, `network:"raw"/"xhttp"/"grpc"`, `password`=бывший `publicKey`; ТЗ-5 §4.2: "балансировщик с префиксным `selector`, `observatory`, `fallbackTag`"). Ни в `agent/`, ни в `provisioning/`, ни в `contracts/` нет буквального JSON — проверено. `services/xray_templates.py` — реконструкция формы полей по стандартным конвенциям Xray-core, согласованная с этим текстовым описанием, а не копия. Также непроверенным остаётся открытый вопрос из ТЗ-3 §0 (~строка 95): подхватывает ли префиксный `selector` балансировщика новый outbound автоматически без пересборки самого правила — код исходит из того, что да (иначе `PATCH /cascades/{id}` при добавлении exit-ноды потребовал бы ещё и `AddRoutingRule` заново), но это не подтверждено эмпирически в рамках этого слайса.
+8. **Dispatch команд Platform→Agent — best-effort, не блокирует HTTP-запрос** (`api/command_dispatch.py`): если нода не подключена или не отвечает, `POST /cascades`/`POST /users`/`DELETE /cascades/{id}`/`DELETE /users/{id}` всё равно завершаются успешно (состояние в БД — источник истины), а `Cascade.status` отражает `degraded`/`down`. Решение принято по аналогии с уже существующим паттерном `decommission_node()` (`api/routes/nodes.py`), явного требования в задании на этот счёт не было — если желаемое поведение "выведенная из сети нода = запрос падает", это отдельное решение для следующего PR.
+9. **mTLS между Agent↔Platform (ТЗ-5 §6.2) всё ещё не реализован** — gRPC-сервер на `insecure_server_credentials`, `EnrollmentAck.mtls_client_cert_pem` пустой. Как следствие, "переподключение по постоянному сертификату" (ТЗ-4 §5.2) реализовано как "первый `Heartbeat` на новом стриме с уже известным `node_id`, если `Enrollment` не отправлялся" (`grpc_server/servicer.py::Session`, ветка `kind == "heartbeat"`) — рабочий суррогат до появления настоящей mTLS-идентификации.
+10. **TOTP/MFA (ТЗ-5 §6.3)**: без изменений с первого слайса — только верификация, провижининг нового секрета всё ещё не реализован.
 
 Ни один файл вне `platform/` не менялся; ни `contracts/proto/agent_control.proto`, ни `contracts/rest/openapi.yaml` не редактировались.
 
@@ -166,15 +184,23 @@ platform/
 
 ## Scope of this slice / TODO (следующие слайсы)
 
-Явно НЕ входит в `platform/api-skeleton` (объявлено в роутере/протоколе с `501`/явным TODO, не молчком пропущено):
+### Сделано в этом слайсе (было TODO в первом слайсе, теперь реализовано)
 
-- **Сборка каскадов и failover (ТЗ-5 §4.2)** — `CascadeInput`/`Cascade` CRUD, трансляция в `AddOutbound`/`AddInbound`/`OverrideBalancer` команды Agent'ам. `POST/GET/PATCH/DELETE /cascades*` возвращают `501`.
-- **Command dispatch Platform → Agent** — `grpc_server/servicer.py::dispatch_command` — заглушка, `NotImplementedError`. Нужен реестр открытых bidi-стримов по `node_id` (например, `asyncio.Queue` на ноду), которого пока нет — бессмысленно строить раньше, чем появится логика сборки каскадов, которая должна инициировать эти команды.
-- **Управление пользователями VPN (ТЗ-5 §4.4)** — `POST/GET/DELETE /users*` — `501`; зависит от существования каскадов.
-- **Учёт потребления (ТЗ-5 §4.4/§6.4)** — `GET /usage` — `501`; ingestion `TelemetryReport` в gRPC-сервисере пока только логируется (`_handle_telemetry_stub`), не пишется в `UsageStat`.
-- **Тест-запросы по связке (ТЗ-5 §4.3)** — `POST /cascades/{id}/test`, `GET /tests/{id}` — `501`; `TestResult` в gRPC-сервисере только логируется (`_handle_test_result_stub`), не пишется в `LinkTest`.
-- **`WS /events`** — маршрут существует, но соединение сразу закрывается с сообщением "не реализовано" — нет источника событий для трансляции (появится вместе с cascade-assembly/command-dispatch).
-- **Ротация секретов (ТЗ-5 §4.5) и фоновые задачи через ARQ** — `RotationRecord` есть в модели данных, но ничего не пишет/не читает эту таблицу; ARQ/Redis не подключены вовсе (нет фоновых задач, которые бы их использовали).
-- **mTLS/step-ca для Agent↔Platform (ТЗ-5 §6.2)** и **TOTP-провижининг (ТЗ-5 §6.3)** — см. "Отклонения от ТЗ" выше.
-- **Keep-alive `Ping`** от Platform к Agent по таймеру, независимо от входящих сообщений — сейчас Platform отвечает только на `Enrollment` (через `EnrollmentAck`), на `Heartbeat` явного ответа не шлёт (это соответствует протоколу — `Heartbeat` не требует ack), но никогда не инициирует `Ping` сама.
-- **Автоматическая деградация статуса ноды** (`HEALTHY → DOWN` по таймауту отсутствия heartbeat, `DEGRADED` по порогам ресурсов) — сейчас статус меняется только "по факту" получения heartbeat/decommission; нет фоновой проверки "нода замолчала N секунд назад".
+- ~~Сборка каскадов и failover~~ — `POST/GET/DELETE /cascades*` реализованы (см. выше). `PATCH /cascades/{id}` — всё ещё `501` (см. ниже).
+- ~~Command dispatch Platform → Agent~~ — `SessionRegistry` + `dispatch_command()` реализованы (`grpc_server/servicer.py`).
+- ~~Управление пользователями VPN~~ — `POST/GET/DELETE /users*` реализованы.
+- ~~Ingestion телеметрии в `UsageStat`~~ — реализовано (`_handle_telemetry`).
+- ~~Смена пароля администратора~~ — `POST /auth/change-password` реализован.
+
+### Явно НЕ входит в этот слайс (объявлено в роутере/протоколе с `501`/явным TODO)
+
+- **`PATCH /cascades/{id}`** — `501`. Нужно диффить пул exit-нод и диспатчить только инкрементальные `AddOutbound`/`RemoveOutbound`, а не пересоздавать каскад целиком.
+- **Тест-запросы по связке (ТЗ-5 §4.3)** — `POST /cascades/{id}/test`, `GET /tests/{id}` — `501`; `TestResult` в gRPC-сервисере коррелируется через тот же `SessionRegistry.resolve()`, что и `CommandResult` (механизм уже есть), но ни один REST-путь пока не вызывает `RunTest`, и `LinkTest`-строки не пишутся.
+- **`GET /usage`** — `501`. `UsageStat` теперь реально наполняется (см. выше), но сам агрегирующий запрос (фильтры `user_id`/`node_id`/`from`/`to`) не написан.
+- **`GET /cascades/{id}/events`** — `501`. Дёшево реализовать прямо сейчас (строки `HealthEvent` уже пишутся при создании/удалении каскада), но не запрашивалось в этом слайсе.
+- **`WS /events`** — маршрут существует, но соединение сразу закрывается с сообщением "не реализовано". Нужен in-process (или Redis pub/sub) broadcast HealthEvent/Cascade/LinkTest-обновлений в реальном времени — ничего из этого не подключено.
+- **ARQ / фоновые задачи** — Redis/ARQ не подключены вовсе. Нужны как минимум: (а) плановая ротация секретов по расписанию (ТЗ-5 §4.5, `RotationRecord` есть в модели, ничего её не пишет/читает), (б) любая периодическая фоновая работа вообще — сейчас Platform целиком реактивна (отвечает только на входящие gRPC/HTTP запросы).
+- **Автоматическая деградация статуса ноды/каскада** (`HEALTHY → DOWN` по таймауту отсутствия heartbeat, `DEGRADED` по порогам ресурсов) — по-прежнему нет фоновой проверки "нода замолчала N секунд назад"; статус меняется только по факту входящего heartbeat. Это первая кандидатная задача для ARQ выше.
+- **mTLS/step-ca для Agent↔Platform** и **TOTP-провижининг** — без изменений, см. "Отклонения от ТЗ" пп.9-10.
+- **Keep-alive `Ping`** от Platform к Agent по таймеру — по-прежнему не реализован (Platform отвечает на `Enrollment`/дожидается `CommandResult`, но никогда не инициирует `Ping` сама).
+- **Многоузловой Platform (несколько реплик за балансировщиком)** — `SessionRegistry` в `grpc_server/servicer.py` — в памяти одного процесса; `dispatch_command()` работает только если вызывающий REST-запрос обслуживается тем же процессом, что держит gRPC-сессию нужной ноды. Для нескольких реплик Platform понадобится вынести реестр в общий брокер (Redis pub/sub и т.п.) — сейчас предполагается один процесс на всё (см. `main.py`, `docker-compose.yml`), что соответствует текущему объёму задачи, но не масштабируется горизонтально как есть.
