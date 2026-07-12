@@ -11,6 +11,12 @@
     cache_valid_time: 3600
   when: agent_image_source == 'build_from_source'
 
+# depth: 1 — известная оговорка: если agent_source_git_ref окажется "голым"
+# commit SHA (не тегом/веткой), а git-сервер не поддерживает shallow-fetch
+# произвольного SHA (не все серверы включают
+# uploadpack.allowReachableSHA1InWant) — эта задача может упасть. Теги
+# обычно работают без проблем (это advertised ref). Если это станет
+# проблемой на практике — убрать depth (полный clone) как надёжный fallback.
 - name: "Клонировать репозиторий (закреплённая версия {{ agent_source_git_ref }}) на целевой хост"
   ansible.builtin.git:
     repo: "{{ agent_source_git_repo }}"
@@ -18,6 +24,34 @@
     version: "{{ agent_source_git_ref }}"
     force: true
     depth: 1
+  when: agent_image_source == 'build_from_source'
+
+# Честная, конкретная проверка вместо непонятной ошибки docker build:
+# ЧЕСТНАЯ НАХОДКА этого слайса — agent/Dockerfile на момент написания этой
+# роли существует ТОЛЬКО на ветке agent/grpc-client-skeleton (и в любом
+# коммите/теге, куда она уже смержена) — сама эта ветка
+# (provisioning/base-hardening-role) на текущий HEAD его не содержит,
+# agent/ здесь пока только TZ-стаб README. Явная проверка здесь конвертирует
+# "docker build падает с непонятной ошибкой про несуществующий Dockerfile"
+# в понятное сообщение оператору.
+- name: Проверить, что закреплённая версия исходников содержит agent/Dockerfile
+  ansible.builtin.stat:
+    path: "{{ agent_source_checkout_dir }}/agent/Dockerfile"
+  register: agent_dockerfile_stat
+  when: agent_image_source == 'build_from_source'
+
+- name: "Preflight: agent/Dockerfile присутствует в закреплённой версии"
+  ansible.builtin.assert:
+    that:
+      - agent_dockerfile_stat.stat.exists
+    fail_msg: >-
+      agent/Dockerfile не найден в {{ agent_source_checkout_dir }} на
+      {{ agent_source_git_ref }}. На момент написания этой роли
+      agent/Dockerfile существует только на ветке
+      agent/grpc-client-skeleton (и там, куда она уже смержена) — ветка
+      provisioning/base-hardening-role сама по себе его не содержит.
+      Укажите agent_source_git_ref, указывающий на версию репозитория, где
+      agent/Dockerfile уже есть.
   when: agent_image_source == 'build_from_source'
 
 # Контекст сборки — КОРЕНЬ клонированного репозитория, не agent_source_checkout_dir/agent
