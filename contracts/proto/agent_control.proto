@@ -42,6 +42,12 @@ message Enrollment {
   string hostname = 2;
   string agent_version = 3;
   NodeRole requested_role = 4;
+  // PKCS#10 CSR (PEM), сгенерирован локально агентом при bootstrap — приватный
+  // ключ никогда не покидает ноду, Platform/CA (step-ca) подписывает только CSR
+  // и возвращает результат в EnrollmentAck.mtls_client_cert_pem. Без этого поля
+  // не было механизма привязать выданный сертификат к ключу агента — найдено
+  // при реализации Agent (см. agent/README.md, "Замеченные вопросы к контракту").
+  bytes csr_pem = 5;
 }
 
 enum NodeRole {
@@ -116,7 +122,8 @@ message EnrollmentAck {
   string node_id = 1;
   bool accepted = 2;
   string reason = 3; // заполнено, если accepted=false
-  bytes mtls_client_cert_pem = 4; // выдаётся один раз при первом enrollment, см. TZ-4 §5.2
+  bytes mtls_client_cert_pem = 4; // подписан из Enrollment.csr_pem, см. TZ-4 §5.2. Приватный ключ
+                                  // сюда не входит и никогда не передаётся по сети.
 }
 
 message Command {
