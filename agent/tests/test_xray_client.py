@@ -71,7 +71,11 @@ async def test_add_inbound_builds_real_handler_config_and_calls_addinbound():
     receiver = proxyman_config_pb2.ReceiverConfig()
     receiver.MergeFromString(inbound.receiver_settings.value)
     assert receiver.port_list.range[0].From == 443
-    assert receiver.stream_settings.protocol_name == "raw"
+    # "raw" is our JSON dialect's name for this transport; "tcp" is the name
+    # Xray's transport registry actually expects (see the long comment on
+    # _TRANSPORT_SETTINGS in xray_client.py -- this distinction was found by
+    # testing against a real Xray-core binary, not guessed).
+    assert receiver.stream_settings.protocol_name == "tcp"
     assert receiver.stream_settings.security_type == "xray.transport.internet.reality.Config"
     assert receiver.sniffing_settings.enabled is True
     assert list(receiver.sniffing_settings.destination_override) == ["http", "tls"]

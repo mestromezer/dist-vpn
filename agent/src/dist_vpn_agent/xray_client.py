@@ -126,14 +126,28 @@ _OUTBOUND_PROXY_SETTINGS: dict[str, type[Message]] = {
 }
 
 # Transport ("network") settings, keyed the same way Xray's own JSON dialect
-# names them. "raw" is Xray's newer name for what used to be called (and is
-# still, internally, proto package/tag) "tcp".
-_TRANSPORT_SETTINGS: dict[str, tuple[type[Message], str]] = {
-    "tcp": (tcp_transport_pb2.Config, "tcpSettings"),
-    "raw": (tcp_transport_pb2.Config, "tcpSettings"),
-    "grpc": (grpc_transport_pb2.Config, "grpcSettings"),
-    "xhttp": (xhttp_transport_pb2.Config, "xhttpSettings"),
-    "ws": (ws_transport_pb2.Config, "wsSettings"),
+# names them. The third tuple element is the string Xray's transport
+# registry actually expects in StreamConfig/TransportConfig.protocol_name --
+# confirmed by reading the `const protocolName = "..."` in each transport
+# package's Go source (transport/internet/{tcp,grpc,websocket,splithttp}/*.go)
+# and cross-checked against a real Xray-core container, NOT guessed: it is
+# *not* always the same as our own JSON dialect's network name -- "raw" is
+# Xray's newer JSON-config alias for what the transport registry still calls
+# "tcp"; "xhttp" (this project's/TZ-4's name for the transport, matching
+# current Xray JSON config docs) is registered as "splithttp" (the
+# transport's original/internal name, predating the "xhttp" rebrand); "ws"
+# is registered as "websocket". Using the JSON-facing name instead of this
+# real registered name fails at Xray's runtime listener-registry lookup
+# with `transport/internet: <name> listener not registered`, not at request
+# validation -- this exact bug was caught by testing against a real
+# Xray-core binary (see the final report for this slice), not by the mock
+# server, which happily accepts any string here.
+_TRANSPORT_SETTINGS: dict[str, tuple[type[Message], str, str]] = {
+    "tcp": (tcp_transport_pb2.Config, "tcpSettings", "tcp"),
+    "raw": (tcp_transport_pb2.Config, "tcpSettings", "tcp"),
+    "grpc": (grpc_transport_pb2.Config, "grpcSettings", "grpc"),
+    "xhttp": (xhttp_transport_pb2.Config, "xhttpSettings", "splithttp"),
+    "ws": (ws_transport_pb2.Config, "wsSettings", "websocket"),
 }
 
 # Stream security settings -- P1-P4 only ever use "none", "tls", or "reality".
@@ -194,15 +208,15 @@ def _build_stream_config(data: dict[str, Any]) -> ti_config_pb2.StreamConfig:
 
     network = data.get("network", "tcp")
     try:
-        transport_cls, settings_key = _TRANSPORT_SETTINGS[network]
+        transport_cls, settings_key, registered_name = _TRANSPORT_SETTINGS[network]
     except KeyError:
         raise ValueError(
             f"unsupported stream network {network!r} (supported: {sorted(_TRANSPORT_SETTINGS)})"
         ) from None
-    stream.protocol_name = network
+    stream.protocol_name = registered_name
     transport_message = _parse_settings(data.get(settings_key, {}), transport_cls)
     transport_entry = stream.transport_settings.add()
-    transport_entry.protocol_name = network
+    transport_entry.protocol_name = registered_name
     transport_entry.settings.CopyFrom(_typed_message(transport_message))
 
     security = data.get("security", "none")
