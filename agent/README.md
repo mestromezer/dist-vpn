@@ -3,17 +3,22 @@
 Полное ТЗ: [../docs/TZ-4-agent.md](../docs/TZ-4-agent.md).
 Контракт: [`../contracts/proto/agent_control.proto`](../contracts/proto/agent_control.proto) (не редактируется здесь — см. [../contracts/README.md](../contracts/README.md)).
 
-Кратко: Python 3.12+, `docker-py` для управления локальным Xray-core (в этом
-срезе — только объявленная зависимость, не используется), gRPC-клиент к
-Platform по контракту `agent_control.proto` (agent dial-out, mTLS), нативные
-gRPC-стабы к самому Xray (`HandlerService`/`RoutingService`/`StatsService`) —
-следующий срез.
+Кратко: Python 3.12+, control-plane gRPC-клиент к Platform по контракту
+`agent_control.proto` (agent dial-out, mTLS), нативные gRPC-стабы к самому
+Xray-core (`HandlerService`/`RoutingService`/`StatsService`, из реально
+завендоренных `.proto` — см. `vendor/xray-proto/`) для девяти из одиннадцати
+`Command`-операций (все, кроме `RunTest`/`RotateSecret`), и `docker-py` для
+управления локальным Xray-core-контейнером.
 
 ## Текущий срез: `agent/grpc-client-skeleton`
 
-Этот срез реализует **только control-plane gRPC-клиент** — канал
-Agent↔Platform (`AgentControl.Session`, единственный bidi-streaming RPC).
-Управление Xray/Docker сюда не входит (см. "Scope of this slice" ниже).
+Предыдущий под-срез реализовал только control-plane канал Agent↔Platform
+(`AgentControl.Session`) с "not implemented"-заглушкой на каждую `Command`.
+Этот под-срез добавляет реальное управление локальным Xray-core:
+`xray_client.py` (нативные gRPC-вызовы к Xray) и `docker_manager.py`
+(жизненный цикл контейнера), подключённые к тому же control-plane клиенту.
+`RunTest` и `RotateSecret` по-прежнему не реализованы предметно (см. "Scope
+of this slice" ниже — это осознанное решение, не недосмотр).
 
 ## Структура
 
@@ -22,17 +27,25 @@ agent/
   pyproject.toml            зависимости, src-layout, пакет dist_vpn_agent
   Dockerfile                двухстадийная сборка (регенерация стабов + wheel, затем рантайм)
   scripts/
-    gen_proto.sh             регенерация Python gRPC-стабов из contracts/proto/agent_control.proto
+    gen_proto.sh                  регенерация Python gRPC-стабов: agent_control.proto И vendor/xray-proto/
+    _fix_xray_proto_imports.py    пост-обработка импортов для завендоренного (многофайлового) Xray proto-дерева
+  vendor/xray-proto/         реальные .proto из XTLS/Xray-core (закреплённый tag/commit) -- см. его README.md
   src/dist_vpn_agent/
     __init__.py
     config.py                AgentSettings (pydantic-settings) + mask_secret()
     logging_setup.py         структурированное JSON-логирование
-    control_client.py        gRPC-клиент control-plane (ядро этого среза)
+    control_client.py        gRPC-клиент control-plane + реальный диспатч Command -> xray_client.py
+    xray_client.py            gRPC-клиент к локальному Xray-core (HandlerService/RoutingService/StatsService)
+    docker_manager.py         жизненный цикл Docker-контейнера Xray-core (docker-py)
     main.py                  точка входа процесса (console-script `dist-vpn-agent`)
-    generated/                сгенерированные protobuf/gRPC стабы — НЕ коммитится (см. .gitignore)
+    generated/                сгенерированные protobuf/gRPC стабы (agent_control + xray/) — НЕ коммитится (см. .gitignore)
   tests/
     mock_platform_server.py  мок AgentControl-сервера для тестов
-    test_control_client.py   end-to-end: enrollment -> heartbeat -> ping -> command
+    mock_xray_server.py       мок HandlerService/RoutingService/StatsService для тестов
+    test_control_client.py   end-to-end: enrollment -> heartbeat -> ping -> real command dispatch
+    test_xray_client.py       все 9 реализованных операций против мок-Xray + разбор ошибок,
+                               плюс отдельный ярус против настоящего Xray-core-контейнера
+    test_docker_manager.py    юнит-тесты (мок docker-клиент) + реальный интеграционный тест против Docker Desktop
     test_config.py           валидация mTLS-конфигурации (в т.ч. bootstrap-случай)
 ```
 
@@ -58,23 +71,41 @@ bash scripts/gen_proto.sh
 
 Скрипт сам резолвит пути относительно своего расположения, так что его можно
 запускать и из `agent/`, и из корня репозитория. Требует `grpcio-tools`
-(ставится вместе с остальными зависимостями выше). Результат кладётся в
-`src/dist_vpn_agent/generated/` — каталог целиком в `.gitignore`
-(`**/generated/`, `**/*_pb2.py`, `**/*_pb2_grpc.py`); коммитится только сам
-скрипт генерации, никогда — его вывод.
+(ставится вместе с остальными зависимостями выше). Компилирует **оба**
+источника за один запуск:
+
+1. `contracts/proto/agent_control.proto` → `src/dist_vpn_agent/generated/*_pb2*.py` (как раньше).
+2. Всё дерево `vendor/xray-proto/**/*.proto` → `src/dist_vpn_agent/generated/xray/` (новое в этом срезе).
+
+Оба каталога целиком в `.gitignore` (`**/generated/`, `**/*_pb2.py`,
+`**/*_pb2_grpc.py`, `**/*_pb2.pyi`); коммитятся только сами `.proto` (в
+`vendor/xray-proto/`) и скрипты генерации, никогда их вывод.
 
 Регенерировать нужно: сразу после установки зависимостей (стабов ещё нет) и
-после любого изменения `agent_control.proto` (изменение — обязанность
-Agent- и Platform-команд одновременно, см. `contracts/README.md`).
+после любого изменения `agent_control.proto` или `vendor/xray-proto/**`.
 
-Технический нюанс, на который стоит обратить внимание при отладке скрипта:
-`protoc`-плагин для Python всегда генерирует плоский top-level импорт в
-`*_pb2_grpc.py` (`import agent_control_pb2 as ...`), независимо от того, куда
-кладётся результат. Это ломается, как только файл оказывается внутри пакета
-(`dist_vpn_agent.generated`), а не лежит прямо на `sys.path`. `gen_proto.sh`
-патчит эту строку на relative-импорт (`from . import agent_control_pb2 as
-...`) через `sed` сразу после генерации — это тот же самый обходной путь,
-ради которого существуют инструменты вроде `protoletariat`.
+Технический нюанс №1 (был и раньше): `protoc`-плагин для Python всегда
+генерирует плоский top-level импорт в `*_pb2_grpc.py`
+(`import agent_control_pb2 as ...`), независимо от того, куда кладётся
+результат. Это ломается, как только файл оказывается внутри пакета
+(`dist_vpn_agent.generated`), а не лежит прямо на `sys.path`. Для
+`agent_control.proto` (один плоский файл) это по-прежнему чинится `sed`
+сразу после генерации.
+
+Технический нюанс №2 (новое в этом срезе): `vendor/xray-proto/` —
+многофайловое дерево, повторяющее структуру каталогов самого Xray-core
+(`app/proxyman/command/command.proto` импортирует `core/config.proto` и
+т.д.), и `protoc` генерирует такой же проблемный "плоский" импорт в
+**каждом** файле дерева, не только в одном `_grpc.py`. Одной строки `sed`
+недостаточно — `_fix_xray_proto_imports.py` обобщает тот же приём:
+пересчитывает нужное число ведущих точек (relative-импорт) для каждого
+файла исходя из его глубины под корнем вывода, и заодно создаёт
+отсутствующие `__init__.py` (protoc их не создаёт для вложенных
+директорий). Это тот же самый обходной путь, ради которого существуют
+инструменты вроде `protoletariat` — он не использован из-за конфликта
+версий `protobuf` с уже установленным `grpcio-tools` (см. историю коммитов
+этого среза), решение через собственный скрипт проще и без даунгрейда
+рантайм-зависимости.
 
 ## Конфигурация (переменные окружения)
 
@@ -156,21 +187,80 @@ bash scripts/gen_proto.sh   # нужно сделать до запуска те
 pytest -v
 ```
 
-Все тесты пройдены локально (`8 passed`, Python 3.13.14 в venv на базе
-`py -3.13`). Что покрыто:
+Все тесты пройдены локально (`38 passed`, Python 3.13.14 в venv на базе
+`py -3.13`). Что покрыто, и — важно — **против чего именно** (мок или
+реальная инфраструктура, см. "Mock vs реальный Xray/Docker — что реально
+проверено" ниже):
 
 - `tests/test_control_client.py` — поднимает лёгкий in-process мок
   `AgentControl`-сервера (`tests/mock_platform_server.py`) на сгенерированных
   стабах и гоняет `ControlClient` по нему через `pytest-asyncio`:
   - enrollment → heartbeat → ping (полный цикл; `node_id` получен от сервера
     и используется в последующих heartbeat);
-  - `Command` → `CommandResult(success=false, error_message="not implemented
-    in this slice")` — контракт исполняется сквозным образом, без реальной
-    логики Xray (это явный, намеренный предмет данного среза);
+  - heartbeat отражает реальный (пусть и через фейковый `DockerManager` в
+    тестах) статус `xray_container_running` — раньше было захардкожено
+    `False`;
+  - `Command` (`add_user`, `add_inbound`) действительно диспатчится в
+    `xray_client.py` (мок-Xray, см. ниже) и возвращает реальный
+    `CommandResult` — как успешный, так и с настоящей ошибкой от Xray/
+    трансляции, не проглоченной;
+  - `RunTest` — единственная команда, которая по-прежнему получает
+    "not implemented" (осознанно, см. "Scope of this slice");
   - отказ enrollment (`accepted=false`) поднимает `EnrollmentRejected`.
+- `tests/test_xray_client.py` — два яруса (см. секцию ниже про mock vs
+  реальный Xray):
+  1. Против in-process мок-`HandlerService`/`RoutingService`/`StatsService`
+     (`tests/mock_xray_server.py`) — все девять диспетчеризуемых операций,
+     разбор ошибок (`grpc.RpcError` не проглатывается), трансляционные
+     ошибки (невалидный JSON, неподдерживаемый протокол/транспорт).
+  2. Против настоящего контейнера `ghcr.io/xtls/xray-core` (класс тестов
+     `test_real_xray_core_*`) — пропускаются с понятной причиной, если
+     Docker недоступен.
+- `tests/test_docker_manager.py` — юнит-тесты на замоканном `docker-py`-
+  клиенте (create/pull/start/no-op/health) плюс один реальный интеграционный
+  тест против настоящего Docker Desktop (`test_real_docker_engine_create_
+  start_stop_restart_cycle`), тоже пропускаемый при недоступном Docker.
 - `tests/test_config.py` — валидация mTLS-конфигурации, включая bootstrap-
   случай (только CA, без клиентского сертификата) и проверку, что
   клиентский сертификат/ключ нельзя задать по отдельности.
+
+### Mock vs реальный Xray/Docker — что реально проверено
+
+Честно, без "verified" по умолчанию:
+
+- **Docker**: в среде разработки этого среза Docker Desktop был доступен и
+  запущен. `docker_manager.py` реально создавал, запускал, останавливал и
+  перезапускал настоящий контейнер `ghcr.io/xtls/xray-core:latest` через
+  собственный код (`test_real_docker_engine_create_start_stop_restart_cycle`,
+  плюс отдельная ручная проверка вне pytest). Если в вашей среде Docker
+  недоступен — этот тест и `ensure_running()` при старте (`main.py`) будут,
+  соответственно, скипаться/логировать `DockerManagerError`, не падая.
+- **Xray-core**: операции `xray_client.py` (все девять диспетчеризуемых:
+  add/remove inbound на всех трёх используемых проектом транспортах —
+  raw/xhttp/ws, add/remove user, add/remove outbound, add/remove routing
+  rule, override_balancer) были реально прогнаны против настоящего
+  `ghcr.io/xtls/xray-core`-контейнера (не только против мока) — как вручную
+  в ходе разработки, так и теперь автоматически, в `test_real_xray_core_*`
+  из `test_xray_client.py` (пропускаются, если Docker недоступен). Это и
+  нашло две реальные несостыковки, которых мок в принципе не мог поймать
+  (мок не декодирует `TypedMessage`-полезную нагрузку, а только записывает
+  байты как есть):
+  1. `stream.protocol_name` должен быть именем транспорта из реестра
+     Xray (`tcp`/`splithttp`/`websocket`), а не именем из JSON-диалекта
+     этого проекта (`raw`/`xhttp`/`ws`) — иначе реальный Xray падает на
+     `transport/internet: <name> listener not registered` при попытке
+     поднять listener.
+  2. `AddRuleRequest.config` должен оборачивать `router.Config`
+     (`{rule: [...]}`), а не голый `RoutingRule` — `Router.AddRule` в
+     реальном Go-коде Xray делает `inst.(*Config)` и возвращает
+     `"AddRule: config type error"` на что угодно ещё.
+
+  Обе несостыковки исправлены в текущем коде `xray_client.py` (см. историю
+  коммитов этого среза) и теперь покрыты и мок-, и реальным ярусом тестов.
+  Что **не** проверено даже реальным Xray: полная семантика каждого
+  возможного сочетания настроек (например, что REALITY-приватный ключ
+  неправильной длины отклоняется так же, как это сделал бы настоящий Xray)
+  — проверена только структурная трансляция и happy-path каждой операции.
 
 ## Docker
 
@@ -197,16 +287,45 @@ insecure-режима. Образ двухстадийный: стадия сб�
 
 ## Scope of this slice / что НЕ реализовано
 
-Реализовано в `agent/grpc-client-skeleton`:
+Этот срез (`agent/grpc-client-skeleton`, под-срез "реальное управление
+Xray-core") добавляет к предыдущему control-plane-only под-срезу:
+
+Реализовано:
 
 - Реальный, запускаемый Python 3.12+ проект (src-layout, пакет `dist_vpn_agent`).
 - Async gRPC-клиент control-plane: agent dial-out, единственный bidi-stream
   `Session`, `Enrollment` → цикл `Heartbeat` + параллельное чтение
   `PlatformMessage`.
 - Обработка `EnrollmentAck` (лог + сохранение `node_id` в памяти процесса),
-  `Ping` (лог), `Command` (лог "не реализовано в этом срезе" + отправка
-  `CommandResult(success=false, error_message="not implemented in this
-  slice")`, так что контракт проходит сквозной цикл целиком).
+  `Ping` (лог).
+- **`Command` → реальное управление локальным Xray-core** (TZ-4 §3.2) для
+  девяти из одиннадцати операций — `xray_client.py` транслирует
+  `AddInbound`/`RemoveInbound`, `AddOutbound`/`RemoveOutbound`, `AddUser`/
+  `RemoveUser` (через `AlterInbound` + `Add`/`RemoveUserOperation`),
+  `AddRoutingRule`/`RemoveRoutingRule`, `OverrideBalancer` в настоящие
+  gRPC-вызовы `HandlerService`/`RoutingService`, используя реально
+  завендоренные `.proto` (`vendor/xray-proto/`), а не угаданные формы
+  сообщений. `control_client.py`'s `_handle_command` диспетчеризует через
+  `_COMMAND_DISPATCH` и возвращает настоящий `CommandResult(success=…,
+  error_message=…)` — включая настоящие ошибки gRPC от Xray, ни одна не
+  проглатывается молча (см. "Mock vs реальный Xray/Docker" выше про то, что
+  из этого реально проверено против настоящего Xray-core, а что — только
+  против мока).
+- **Жизненный цикл Docker-контейнера Xray-core** (TZ-4 §5.4) —
+  `docker_manager.py`, через `docker-py`: создаёт/стартует/проверяет
+  здоровье контейнера `settings.xray_container_name`, никогда не трогая
+  никакой другой контейнер. Решение "Agent работает на хосте напрямую, а не
+  монтирует `docker.sock` внутрь себя" явно принято и обосновано в
+  докстринге модуля (TZ-4 §5.4 явно требует зафиксировать этот выбор).
+  `main.py` вызывает `ensure_running()` при старте процесса, не блокируясь
+  на доступности Platform.
+- **`Heartbeat.health.xray_container_running` — реальные данные**, а не
+  захардкоженный `False`: `control_client.py` спрашивает
+  `docker_manager.health()` на каждый heartbeat (в отдельном потоке —
+  `docker-py` синхронный, зависший Docker Engine API не должен стопорить
+  control-plane цикл). `cpu_percent`/`mem_percent`/`disk_percent`
+  по-прежнему заглушки (нужен отдельный выбор способа сэмплинга ресурсов
+  хоста, например `psutil` — не сделан в этом срезе).
 - mTLS-канал по умолчанию (с осмысленным bootstrap-исключением для самого
   первого enrollment — см. выше), explicit insecure dev-режим только по
   явному флагу, с громким предупреждением.
@@ -214,39 +333,64 @@ insecure-режима. Образ двухстадийный: стадия сб�
   утечки секретов в лог (`SecretStr` + `mask_secret()`).
 - Реконнект с экспоненциальным backoff вокруг одной сессии (`run_forever`)
   — минимальная версия "переживает кратковременную потерю связи" (TZ-4
-  §4/§8), но БЕЗ полной декларативной реконсиляции состояния (для неё нет
-  ещё Xray-слоя, который нужно приводить к желаемому состоянию).
-- Тесты (мок `AgentControl`-сервера, `pytest-asyncio`), `Dockerfile`
-  (собран и прогнан вручную), скрипт регенерации стабов.
+  §4/§8). Теперь есть Xray-слой, который можно приводить к желаемому
+  состоянию, но полная декларативная реконсиляция после реконнекта (Platform
+  пере-отправляет весь желаемый стейт, а не только новые команды) всё ещё не
+  реализована — см. TODO ниже.
+- Тесты: 38 прошедших локально, два яруса для Xray и для Docker (мок +
+  реальная инфраструктура там, где она была доступна — см. "Mock vs
+  реальный Xray/Docker" выше), `Dockerfile` (Agent-контейнер, собран и
+  прогнан вручную в предыдущем под-срезе), скрипт регенерации стабов
+  (теперь генерирует стабы и для `agent_control.proto`, и для
+  `vendor/xray-proto/`).
 
-Сознательно НЕ реализовано в этом срезе (следующие срезы, по TZ-4):
+Сознательно НЕ реализовано в этом срезе (TODO для следующего среза, по TZ-4):
 
-- Управление Xray-core (`HandlerService`/`RoutingService`/`StatsService`,
-  TZ-4 §3.2) — `Command` в этом срезе только логируется и получает ответ
-  "not implemented", реальной трансляции в вызовы к Xray нет.
-- Управление жизненным циклом Docker-контейнера Xray. `docker-py` в этом
-  срезе — только объявленная зависимость в `pyproject.toml`, нигде не
-  вызывается (решение по TZ-4 §5.4 — как именно Agent получает доступ к
-  Docker Engine API — сознательно отложено до появления кода, который
-  реально этим управляет).
-- Пресеты P1–P4 и ротация REALITY/TLS-секретов (TZ-4 §3.3) — `RotateSecret`
-  приходит по контракту, но предметно не обрабатывается.
-- Тест-запрос через эфемерный клиент (TZ-4 §3.4) — `RunTest` не
-  обрабатывается предметно (эфемерный Docker-контейнер не поднимается).
-- Телеметрия per-user/per-inbound счётчиков (TZ-4 §3.5) — `TelemetryReport`
-  не отправляется, т.к. считать пока нечего без слоя управления Xray.
-- Персист сертификата, полученного в `EnrollmentAck.mtls_client_cert_pem`,
-  на диск и его последующее использование вместо токена при реконнектах —
-  сейчас каждый перезапуск процесса требует валидный (одноразовый!)
-  `enrollment_token` заново. Это важно закрыть в следующем срезе вместе с
-  решением вопроса о CSR/keypair (см. "Замеченные вопросы к контракту").
-- Backhaul-транспорт Hop B как pluggable-абстракция (TZ-4 §6) — вне
-  периметра control-plane клиента.
-- Self-diagnostics по недоступности Docker/испорченному локальному
-  сертификату (TZ-4 §7) — в этом срезе есть только диагностика по
-  недоступности Platform (структурированные ERROR-логи с причиной и
-  реконнектом, без тихого зависания); Docker/сертификат пока нечем
-  диагностировать, т.к. они не используются.
+- **`RunTest` — тест-запрос через эфемерный клиент** (TZ-4 §3.4). Требует
+  поднятия эфемерного Docker-контейнера с тем же образом Xray и параметрами
+  конкретного пресета/узла, HTTP-запроса через полученный SOCKS-прокси к
+  контрольному URL, и структурированного `TestResult` (успех/код/задержка/
+  шаг отказа — не просто ok/fail, см. контракт). Это отдельный кусок работы
+  поверх `docker_manager.py` (эфемерные, а не долгоживущие контейнеры) —
+  сознательно не в этом срезе, который был про долгоживущий Xray-core.
+- **`RotateSecret` — ротация REALITY/TLS-секретов** (TZ-4 §3.3). Двухфазная
+  ротация (новый inbound рядом со старым, Platform решает момент удаления
+  старого) требует более явного дизайна координации Agent↔Platform поверх
+  того, что уже есть в `Command`/`CommandResult` — не просто ещё один вызов
+  `xray_client.py`, а решение, как Agent сообщает Platform "новый inbound
+  готов, можно переключать" и т.п. Не спроектировано в этом срезе.
+- **Персист сертификата из `EnrollmentAck.mtls_client_cert_pem`** и
+  последующее использование вместо токена при реконнектах — сейчас каждый
+  перезапуск процесса требует валидный (одноразовый!) `enrollment_token`
+  заново; `_handle_platform_message` только логирует факт получения
+  сертификата. Контракт для этого уже частично готов — см. "Замеченные
+  вопросы к контракту" ниже: `Enrollment.csr_pem` появился в контракте
+  между разработкой предыдущего и этого под-среза, но Agent пока не
+  генерирует локальный keypair/CSR и не заполняет это поле, и не персистит
+  ответ на диск. Следующий срез должен закрыть весь путь: генерация
+  keypair+CSR → отправка в `Enrollment.csr_pem` → сохранение
+  `mtls_client_cert_pem` на диск с правами `600` (TZ-4 §5.3) → использование
+  при последующих запусках вместо токена.
+- **Backhaul-транспорт Hop B как pluggable-абстракция** (TZ-4 §6) — вне
+  периметра и control-plane клиента, и Xray-management слоя этого среза;
+  `xray_client.py` умеет добавить любой сконфигурированный inbound/outbound,
+  но решение "как именно устроен Hop A↔Hop B backhaul и что в этом
+  pluggable" не принято.
+- Телеметрия per-user/per-inbound счётчиков (TZ-4 §3.5) — `StatsService.
+  QueryStats` уже реально работает (`xray_client.py.query_stats`,
+  используется тестами), но никакой `Command` его не вызывает и
+  `TelemetryReport` никуда не отправляется — нужен отдельный периодический
+  цикл сбора и отправки, не только реактивный ответ на команды.
+- Self-diagnostics по испорченному локальному mTLS-сертификату (TZ-4 §7) —
+  для недоступности Platform и недоступности/нездоровья Docker диагностика
+  уже есть (структурированные ERROR-логи, `DockerManagerError` пойман и
+  залогирован, а не тихо проглочен, heartbeat честно репортит нездоровье);
+  для сертификата пока нечего диагностировать, т.к. персиста/ротации
+  сертификата ещё нет (см. пункт выше).
+- Сэмплинг реальных `cpu_percent`/`mem_percent`/`disk_percent` для
+  `Heartbeat.health` (сейчас `0.0` — заглушка) — `xray_container_running`
+  теперь реальный, но эти три поля ещё нет; нужен выбор способа сэмплинга
+  (скорее всего `psutil`, не добавлен как зависимость в этом срезе).
 
 ## Замеченные вопросы к контракту (не тронуты, только отчёт)
 
@@ -272,8 +416,36 @@ Platform-CA должен подписывать выдаваемый серти�
    сертификат, но и приватный ключ (менее предпочтительно с точки зрения
    PKI-гигиены, но проще и, возможно, было тем, что имелось в виду).
 
-В этом срезе решение не принято — реализован только явный fallback (см.
-"mTLS и bootstrap-нюанс" выше): самый первый enrollment идёт по TLS с
-проверкой только серверного сертификата, а `EnrollmentAck.mtls_client_cert_pem`,
-когда он приходит, только логируется (без персиста и без попытки построить
-из него рабочую клиентскую identity) — см. "Scope of this slice" выше.
+**Обновление относительно предыдущего под-среза**: пробел, описанный выше
+(CSR/публичный ключ отсутствовали в `Enrollment`), с тех пор закрыт на
+уровне контракта — веткой `main` (не этой веткой) в коммите
+`fix(contracts): add CSR field to Enrollment for cert-key binding`.
+`Enrollment` теперь содержит `bytes csr_pem = 5` (PKCS#10 CSR, PEM), а
+комментарий на `EnrollmentAck.mtls_client_cert_pem` явно ссылается на него
+("подписан из `Enrollment.csr_pem`"). Этот срез слил `main` в
+`agent/grpc-client-skeleton` (`git merge main`, затронуты только
+`contracts/` — `agent/` этим слиянием не тронут), чтобы не остаться
+позади факта: расхождение найдено сравнением с `main` напрямую
+(`git log main -- contracts/...`), а не только историей этой ветки.
+
+Поле в контракте теперь есть, но **Agent пока не использует его** — это
+осталось в TODO этого среза (см. "Scope of this slice" выше, пункт про
+персист сертификата): нужно (1) сгенерировать локальный keypair и CSR, (2)
+заполнить `Enrollment.csr_pem` вместо оставления его пустым, (3) сохранить
+полученный `EnrollmentAck.mtls_client_cert_pem` на диск с правами `600`
+(TZ-4 §5.3), (4) использовать сохранённый сертификат вместо токена при
+последующих запусках/реконнектах. Ничего из этого не реализовано здесь —
+`_build_enrollment_message` в `control_client.py` по-прежнему не
+устанавливает `csr_pem`, и `_handle_platform_message` по-прежнему только
+логирует факт получения сертификата, не персистя его. Второй вариант
+решения, упомянутый выше (Platform генерирует keypair и отдаёт приватный
+ключ агенту), явно отклонён самим фактом появления `csr_pem` в контракте —
+принят вариант 1 (агент генерирует keypair/CSR локально), так что он больше
+не рассматривается как открытый вопрос.
+
+До тех пор, пока следующий срез не реализует пункты (1)-(4) выше, в этом
+срезе действует только явный fallback (см. "mTLS и bootstrap-нюанс" выше):
+самый первый enrollment идёт по TLS с проверкой только серверного
+сертификата, а `EnrollmentAck.mtls_client_cert_pem`, когда он приходит,
+только логируется (без персиста и без попытки построить из него рабочую
+клиентскую identity) — см. "Scope of this slice" выше.
