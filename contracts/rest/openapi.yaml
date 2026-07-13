@@ -68,8 +68,45 @@ paths:
   /auth/logout:
     post:
       summary: Отзыв текущего refresh-токена
+      # Уточнено после реализации Admin Client (см. admin-client/README.md,
+      # "Замечания к контракту"): без явного тела было неясно, какой именно
+      # refresh-токен отзывать. refresh_token — опционально (не ломает уже
+      # реализованный клиент, который его пока не отправляет), но рекомендуется
+      # передавать явно, а не полагаться на то, что сервер сам сопоставит сессию
+      # по access-токену из Authorization — тот может быть уже почти просрочен
+      # или не содержать однозначного session id.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string, description: "Рекомендуется передавать явно" }
       responses:
         "204": { description: OK }
+
+  /auth/change-password:
+    post:
+      summary: >-
+        Сменить пароль текущего администратора. Обязателен к вызову, если
+        последний /auth/login вернул must_change_password=true (TZ-5 §6.3 —
+        дефолтный сгенерированный пароль требует немедленной смены).
+        Добавлено после реализации Platform, где поле already существовало
+        в ответе логина, но точки, куда вести пользователя, не было.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string }
+      responses:
+        "204": { description: "Пароль изменён, must_change_password сброшен в false" }
+        "401": { description: "current_password не совпадает" }
 
   /nodes:
     get:
@@ -151,6 +188,7 @@ paths:
                 type: object
                 properties:
                   items: { type: array, items: { $ref: "#/components/schemas/Cascade" } }
+                  total: { type: integer, description: "Согласовано с /nodes — обязательно для точной пагинации на клиенте" }
     post:
       summary: Собрать новый каскад (входная нода + пул выходных кандидатов)
       requestBody:
@@ -242,6 +280,7 @@ paths:
                 type: object
                 properties:
                   items: { type: array, items: { $ref: "#/components/schemas/User" } }
+                  total: { type: integer, description: "Согласовано с /nodes — обязательно для точной пагинации на клиенте" }
     post:
       summary: Создать пользователя (см. TZ-5 §4.4)
       requestBody:
@@ -305,6 +344,14 @@ components:
         access_token: { type: string }
         refresh_token: { type: string }
         expires_in: { type: integer, description: "Секунды до истечения access-токена (15-30 минут, см. TZ-5 §6.3)" }
+        must_change_password:
+          type: boolean
+          description: >-
+            true, если пароль — сгенерированный при первом деплое дефолт и требует
+            немедленной смены (TZ-5 §6.3). Уточнено после реализации Platform —
+            изначально поле было только в реализации, не в контракте.
+            Admin Client обязан показать экран смены пароля, если true, и не
+            пускать дальше без вызова POST /auth/change-password.
 
     NodeRole:
       type: string
