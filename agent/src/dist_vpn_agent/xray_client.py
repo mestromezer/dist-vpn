@@ -1,6 +1,6 @@
 """gRPC client to the *local* Xray-core control API.
 
-Wraps the six ``Command`` operations from ``contracts/proto/agent_control.proto``
+Wraps the nine ``Command`` operations from ``contracts/proto/agent_control.proto``
 that TZ-4 SS3.2 maps onto real Xray-core gRPC calls:
 
 | ``Command.op``                    | Xray gRPC call                                         |

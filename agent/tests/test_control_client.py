@@ -114,9 +114,10 @@ async def test_heartbeat_reflects_real_docker_manager_health(xray_running):
 @pytest.mark.asyncio
 async def test_run_test_command_returns_not_implemented_result():
     # RunTest is one of the two ops this slice deliberately leaves
-    # unimplemented (see agent/README.md) -- unlike the six real ops below,
-    # it should still get an honest, explicit CommandResult(success=False),
-    # never a silent hang or a crash of the whole session.
+    # unimplemented (see agent/README.md) -- unlike the nine real ops
+    # dispatched elsewhere, it should still get an honest, explicit
+    # CommandResult(success=False), never a silent hang or a crash of the
+    # whole session.
     command = pb2.Command(command_id="cmd-1", run_test=pb2.RunTest(test_id="t1", probe_url="https://example.com"))
     servicer = MockAgentControlServicer(node_id="node-xyz", accept=True, send_command=command)
 

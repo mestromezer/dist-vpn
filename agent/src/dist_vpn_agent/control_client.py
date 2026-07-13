@@ -17,12 +17,13 @@ Design constraints from TZ-4, followed here:
   full (SS5.3).
 
 Scope of *this* slice: enrollment, heartbeat, ping handling, and real
-dispatch of six ``Command`` operations to the local Xray-core via
-``xray_client.py`` (add/remove inbound/outbound, add/remove user,
-add/remove routing rule, override balancer) -- see ``_COMMAND_DISPATCH``
-below. ``run_test`` and ``rotate_secret`` remain unimplemented (see
-agent/README.md "Scope of this slice" for why), and persisting/rotating the
-mTLS certificate issued via ``EnrollmentAck`` is still out of scope here.
+dispatch of nine ``Command`` operations to the local Xray-core via
+``xray_client.py`` (add/remove inbound, add/remove outbound, add/remove
+user, add/remove routing rule, override balancer) -- see
+``_COMMAND_DISPATCH`` below. ``run_test`` and ``rotate_secret`` remain
+unimplemented (see agent/README.md "Scope of this slice" for why), and
+persisting/rotating the mTLS certificate issued via ``EnrollmentAck`` is
+still out of scope here.
 """
 
 from __future__ import annotations
