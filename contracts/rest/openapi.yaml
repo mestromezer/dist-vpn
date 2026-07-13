@@ -258,6 +258,31 @@ paths:
                 properties:
                   test_id: { type: string }
 
+  /cascades/{cascade_id}/tests:
+    parameters:
+      - { name: cascade_id, in: path, required: true, schema: { type: string } }
+    get:
+      # Добавлено после реализации Admin Client (см. admin-client/README.md,
+      # "Замечания к контракту"): ТЗ-5 §7 упоминал этот путь в прозе как
+      # "история", но в самой YAML-схеме эндпоинта не было — история
+      # тест-запросов существовала только как то, что клиент мог бы
+      # накопить сам в локальном состоянии (терялось бы при перезагрузке
+      # страницы). Формат ответа — тот же items+total конверт, что и у
+      # остальных списков.
+      summary: История тест-запросов по конкретной связке (TZ-5 §4.3, TZ-6 §3.2)
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 25 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/LinkTest" } }
+                  total: { type: integer }
+
   /tests/{test_id}:
     parameters:
       - { name: test_id, in: path, required: true, schema: { type: string } }
