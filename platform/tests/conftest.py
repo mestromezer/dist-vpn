@@ -21,9 +21,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from dist_vpn_platform.app import create_app
+from dist_vpn_platform.config import settings
 from dist_vpn_platform.db import configure_database, get_engine
 from dist_vpn_platform.models import Base
 from dist_vpn_platform.models.admin_account import AdminAccount
+from dist_vpn_platform.security import mtls_ca
 from dist_vpn_platform.security.passwords import hash_password
 from dist_vpn_platform.security.rate_limit import limiter
 
@@ -41,6 +43,21 @@ async def db_engine() -> AsyncIterator[None]:
 
     await engine.dispose()
     db_path.unlink(missing_ok=True)
+
+
+@pytest.fixture(autouse=True)
+def _mtls_ca_dir(tmp_path: Path) -> None:
+    """Every test gets its own throwaway CA directory (same per-test isolation
+    pattern as db_engine's per-test sqlite file, just synchronous since CA generation
+    itself is) - real Enrollment.csr_pem handling (TZ-5 §6.2) now depends on a real CA
+    being loadable via security/mtls_ca.py, and tests must not read/write a real
+    shared `var/ca` on disk or leak CA material across test runs."""
+    original = settings.mtls_ca_dir
+    settings.mtls_ca_dir = str(tmp_path / "ca")
+    mtls_ca.reset_cache_for_tests()
+    yield
+    settings.mtls_ca_dir = original
+    mtls_ca.reset_cache_for_tests()
 
 
 @pytest.fixture(autouse=True)

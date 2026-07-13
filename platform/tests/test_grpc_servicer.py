@@ -19,6 +19,7 @@ from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
 from dist_vpn_platform.models.usage_stat import UsageStat
 from dist_vpn_platform.models.user import User
 from dist_vpn_platform.security.enrollment_tokens import generate_token, hash_token
+from tests.grpc_test_helpers import generate_test_csr_pem
 
 
 async def _seed_enrollment_token() -> str:
@@ -45,18 +46,21 @@ async def test_enrollment_with_valid_token_creates_node(db_engine: None) -> None
             hostname="ru-vds-01",
             agent_version="0.1.0",
             requested_role=pb.NODE_ROLE_ENTRY,
+            csr_pem=generate_test_csr_pem("ru-vds-01"),
         ),
         peer="test-peer",
     )
 
     assert ack.accepted is True
     assert ack.node_id
+    assert ack.mtls_client_cert_pem  # TZ-5 §6.2: real cert PEM, no longer an empty placeholder
 
     async with session_scope() as db:
         node = await db.get(Node, ack.node_id)
         assert node is not None
         assert node.status == NodeStatus.ENROLLING
         assert node.hostname == "ru-vds-01"
+        assert node.mtls_cert_fingerprint  # populated from the issued client cert
 
         token_row = (await db.execute(select(EnrollmentToken))).scalar_one()
         assert token_row.used_at is not None
@@ -79,12 +83,14 @@ async def test_enrollment_token_cannot_be_reused(db_engine: None) -> None:
     servicer = AgentControlServicer()
 
     first = await servicer._handle_enrollment(
-        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_EXIT), peer="peer-a"
+        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_EXIT, csr_pem=generate_test_csr_pem()),
+        peer="peer-a",
     )
     assert first.accepted is True
 
     second = await servicer._handle_enrollment(
-        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_EXIT), peer="peer-b"
+        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_EXIT, csr_pem=generate_test_csr_pem()),
+        peer="peer-b",
     )
     assert second.accepted is False
     assert "used" in second.reason.lower()
@@ -95,7 +101,8 @@ async def test_heartbeat_transitions_enrolling_to_healthy(db_engine: None) -> No
     plaintext = await _seed_enrollment_token()
     servicer = AgentControlServicer()
     ack = await servicer._handle_enrollment(
-        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY), peer="test-peer"
+        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY, csr_pem=generate_test_csr_pem()),
+        peer="test-peer",
     )
 
     await servicer._handle_heartbeat(
@@ -125,7 +132,8 @@ async def test_telemetry_persists_usage_stats_and_resolves_known_user(db_engine:
     plaintext = await _seed_enrollment_token()
     servicer = AgentControlServicer()
     ack = await servicer._handle_enrollment(
-        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY), peer="test-peer"
+        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY, csr_pem=generate_test_csr_pem()),
+        peer="test-peer",
     )
 
     async with session_scope() as db:

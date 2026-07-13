@@ -2,8 +2,10 @@
 
 Scope for this slice (see platform/README.md "Что это делает" / TODO):
   - Enrollment: validated against a seeded/real EnrollmentToken row, creates the Node
-    (status ENROLLING), returns EnrollmentAck. mTLS certificate issuance (TZ-5 §6.2,
-    step-ca) is a documented TODO - `mtls_client_cert_pem` is empty for now.
+    (status ENROLLING), returns EnrollmentAck. mTLS client certificate issuance
+    (TZ-5 §6.2) is real: the submitted CSR is parsed, self-signature-verified, and
+    signed by the Platform's own CA (security/mtls_ca.py) - `mtls_client_cert_pem` is
+    the resulting cert PEM. Enrollment is rejected if csr_pem is missing/malformed.
   - Heartbeat: updates Node.last_heartbeat_at + health fields, and performs the
     ENROLLING -> HEALTHY / DOWN|DEGRADED -> HEALTHY transitions (TZ-5 §4.1), logging a
     HealthEvent on any status change.
@@ -36,6 +38,7 @@ from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
 from dist_vpn_platform.models.usage_stat import UsageStat
 from dist_vpn_platform.models.user import User
+from dist_vpn_platform.security import mtls_ca
 from dist_vpn_platform.security.enrollment_tokens import hash_token
 
 logger = logging.getLogger(__name__)
@@ -267,6 +270,19 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             if role is None:
                 return pb.EnrollmentAck(accepted=False, reason="requested_role must be ENTRY or EXIT")
 
+            # TZ-5 §6.2: sign the Agent's PKCS#10 CSR into a short-lived mTLS client
+            # cert before touching the DB - a malformed/invalid CSR must not burn the
+            # (single-use) enrollment token or create a Node row, same as any other
+            # rejection path above. See security/mtls_ca.py for validity/algorithm.
+            try:
+                ca = mtls_ca.get_mtls_material().ca
+                client_cert_pem = mtls_ca.sign_client_csr(ca, enrollment.csr_pem)
+            except mtls_ca.CSRValidationError as exc:
+                logger.warning(
+                    "enrollment_rejected", extra={"peer": peer, "reason": "invalid_csr", "detail": str(exc)}
+                )
+                return pb.EnrollmentAck(accepted=False, reason=f"invalid csr_pem: {exc}")
+
             node = Node(
                 label=token_row.label,
                 hostname=enrollment.hostname,
@@ -274,6 +290,7 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                 agent_version=enrollment.agent_version,
                 status=NodeStatus.ENROLLING,
                 enrollment_token_id=token_row.id,
+                mtls_cert_fingerprint=mtls_ca.fingerprint_sha256_hex(client_cert_pem),
             )
             db.add(node)
             token_row.used_at = datetime.now(timezone.utc)
@@ -283,9 +300,7 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                 "enrollment_accepted",
                 extra={"peer": peer, "node_id": node.id, "role": role.value},
             )
-            # TODO(TZ-5 §6.2): issue a real short-lived mTLS client certificate via
-            # step-ca instead of returning an empty placeholder.
-            return pb.EnrollmentAck(node_id=node.id, accepted=True, mtls_client_cert_pem=b"")
+            return pb.EnrollmentAck(node_id=node.id, accepted=True, mtls_client_cert_pem=client_cert_pem)
 
     async def _handle_heartbeat(self, heartbeat: pb.Heartbeat) -> None:
         async with session_scope() as db:

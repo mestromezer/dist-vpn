@@ -22,7 +22,12 @@ from dist_vpn_platform.grpc_server.servicer import (
     dispatch_command,
     new_command_id,
 )
-from tests.grpc_test_helpers import FakeContext, FakeRequestIterator, seed_enrollment_token
+from tests.grpc_test_helpers import (
+    FakeContext,
+    FakeRequestIterator,
+    generate_test_csr_pem,
+    seed_enrollment_token,
+)
 
 
 @pytest.mark.asyncio
@@ -35,7 +40,13 @@ async def test_dispatch_command_is_received_on_the_live_stream_and_result_resolv
     # 1. The "Agent" enrolls - drive the handshake by hand to learn its node_id, which
     # is required before dispatch_command() has anywhere to send a Command.
     await fake_requests.send(
-        pb.AgentMessage(enrollment=pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY))
+        pb.AgentMessage(
+            enrollment=pb.Enrollment(
+                enrollment_token=plaintext,
+                requested_role=pb.NODE_ROLE_ENTRY,
+                csr_pem=generate_test_csr_pem(),
+            )
+        )
     )
     enrollment_reply = await session_gen.__anext__()
     assert enrollment_reply.WhichOneof("payload") == "enrollment_ack"
@@ -84,7 +95,13 @@ async def test_dispatch_command_times_out_if_agent_never_replies(db_engine: None
     session_gen = servicer.Session(fake_requests, FakeContext())
 
     await fake_requests.send(
-        pb.AgentMessage(enrollment=pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY))
+        pb.AgentMessage(
+            enrollment=pb.Enrollment(
+                enrollment_token=plaintext,
+                requested_role=pb.NODE_ROLE_ENTRY,
+                csr_pem=generate_test_csr_pem(),
+            )
+        )
     )
     enrollment_reply = await session_gen.__anext__()
     node_id = enrollment_reply.enrollment_ack.node_id

@@ -16,12 +16,32 @@ import asyncio
 import contextlib
 from datetime import datetime, timedelta, timezone
 
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
 from dist_vpn_platform.db import session_scope
 from dist_vpn_platform.generated import agent_control_pb2 as pb
 from dist_vpn_platform.grpc_server.servicer import AgentControlServicer
 from dist_vpn_platform.models.enrollment_token import EnrollmentToken
 from dist_vpn_platform.models.node import NodeRole
 from dist_vpn_platform.security.enrollment_tokens import generate_token, hash_token
+
+
+def generate_test_csr_pem(common_name: str = "fake-agent") -> bytes:
+    """Build a real, self-signed PKCS#10 CSR (own throwaway EC keypair, never
+    persisted) - Enrollment.csr_pem is mandatory as of the mTLS slice (security/
+    mtls_ca.py::sign_client_csr rejects missing/malformed CSRs), so every test that
+    drives enrollment (directly or via FakeAgent below) needs one that actually
+    verifies, not a placeholder string."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)]))
+        .sign(key, hashes.SHA256())
+    )
+    return csr.public_bytes(serialization.Encoding.PEM)
 
 
 class FakeContext:
@@ -102,6 +122,7 @@ class FakeAgent:
                     enrollment_token=plaintext,
                     hostname=hostname,
                     requested_role=pb.NODE_ROLE_ENTRY if role == NodeRole.ENTRY else pb.NODE_ROLE_EXIT,
+                    csr_pem=generate_test_csr_pem(hostname or "fake-agent"),
                 )
             )
         )
