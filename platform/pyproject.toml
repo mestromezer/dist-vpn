@@ -24,6 +24,9 @@ dependencies = [
     "pyotp>=2.9,<3.0",
     "slowapi>=0.1.9,<1.0",
     "python-json-logger>=2.0,<3.0",
+    # mTLS CA (TZ-5 §6.2, see security/mtls_ca.py) - CA/leaf cert generation and CSR
+    # signing, in-process instead of an external step-ca service for this slice.
+    "cryptography>=43.0,<44.0",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +35,10 @@ dev = [
     "pytest-asyncio>=0.24,<1.0",
     "httpx>=0.27,<1.0",
     "aiosqlite>=0.20,<1.0",
+    # WS /events tests (see tests/test_events.py) - drives a real ASGI websocket
+    # upgrade over httpx's ASGITransport, same async-test style as the rest of this
+    # suite (unlike starlette.testclient.TestClient, which is sync-only).
+    "httpx-ws>=0.6,<1.0",
 ]
 
 [tool.setuptools.packages.find]

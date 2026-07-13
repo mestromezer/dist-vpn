@@ -59,5 +59,17 @@ class Settings(BaseSettings):
     # --- Enrollment tokens (TZ-5 §4.1 / §6.2) ---
     enrollment_token_ttl_minutes: int = 30
 
+    # --- mTLS CA (TZ-5 §6.2 - see security/mtls_ca.py for the full design note) ---
+    # Persistent volume for the CA keypair/cert + server leaf keypair/cert. Local/non-
+    # Docker dev: relative to the working directory. docker-compose.yml overrides this
+    # to a named volume mounted at /var/lib/dist-vpn-platform/ca so it survives
+    # container recreation.
+    mtls_ca_dir: str = "var/ca"
+    # Comma-separated hostnames/IPs for the server leaf cert's SAN - the Platform's own
+    # gRPC server identity that Agents verify against the CA root. Must include
+    # whatever hostname(s) Agents will actually dial plus localhost/127.0.0.1 for local
+    # dev/tests.
+    mtls_server_sans: str = "localhost,127.0.0.1"
+
 
 settings = Settings()
