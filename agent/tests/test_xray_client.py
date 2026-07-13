@@ -1,21 +1,39 @@
-"""End-to-end tests for XrayClient against an in-process mock Xray-core
-(HandlerService/RoutingService/StatsService), covering the six real
-operations wired up in this slice plus request-translation and gRPC error
-propagation.
+"""End-to-end tests for XrayClient.
 
-Scope note (see agent/README.md and the final-report notes on this slice):
-these tests verify XrayClient builds wire-correct requests against the real
-vendored Xray-core proto shapes and that RPC errors are surfaced, not
-swallowed. They do NOT verify a real Xray-core binary accepts these
-requests semantically (e.g. that a REALITY private key of the wrong length
-is rejected the way real Xray would) -- this sandboxed environment has no
-Xray-core binary to test against; see the final report for exactly what
-was and wasn't verified against the real thing.
+Two tiers, mirroring tests/test_docker_manager.py's split -- be explicit
+about which is which (see the final report for this slice):
+
+1. Against an in-process mock Xray-core (HandlerService/RoutingService/
+   StatsService, tests/mock_xray_server.py), covering all nine dispatched
+   operations plus request-translation and gRPC error propagation. These
+   verify XrayClient builds wire-correct requests against the real vendored
+   Xray-core proto shapes and that RPC errors are surfaced, not swallowed --
+   but the mock never decodes/validates a TypedMessage payload's semantics,
+   so it cannot catch a request that is wire-valid but means the wrong
+   thing to real Xray. These always run.
+
+2. Against a genuine `ghcr.io/xtls/xray-core` container (real integration
+   tier at the bottom of this file, skipped with a clear reason if Docker is
+   unreachable) -- this is what actually caught two real bugs during this
+   slice's development that tier 1 could not have caught: the transport-
+   registry name mismatch (see _TRANSPORT_SETTINGS's comment in
+   xray_client.py -- "raw"/"xhttp"/"ws" are this project's JSON-dialect
+   names, not what Xray's transport registry is keyed by) and
+   AddRuleRequest.config needing a full router.Config wrapper rather than a
+   bare RoutingRule (see add_routing_rule's comment) -- both found by
+   actually running the real binary, not guessed or found by reading Go
+   source alone. Semantics not covered by either tier: e.g. whether a
+   REALITY private key of the wrong length is rejected the way real Xray
+   would -- these tests don't attempt that; they check that translation
+   happens correctly, not that every combination of settings is valid to
+   Xray's own deeper checks.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 import grpc
 import pytest
@@ -158,8 +176,19 @@ async def test_add_routing_rule_and_remove_routing_rule():
     assert len(routing.add_rule_requests) == 1
     add_request = routing.add_rule_requests[0]
     assert add_request.shouldAppend is True
-    rule = router_config_pb2.RoutingRule()
-    rule.MergeFromString(add_request.config.value)
+    # AddRuleRequest.config wraps a router.Config (domain_strategy/rule/
+    # balancing_rule), not a bare RoutingRule -- Xray-core's real
+    # Router.AddRule (Go) type-asserts on *Config specifically and rejects
+    # anything else with the literal error "AddRule: config type error".
+    # Found by testing against a real Xray-core container (see
+    # add_routing_rule's comment in xray_client.py); the mock server here
+    # doesn't decode the TypedMessage payload at all, so it would have
+    # happily accepted the old (wrong) bare-RoutingRule version too.
+    assert add_request.config.type == router_config_pb2.Config.DESCRIPTOR.full_name
+    config = router_config_pb2.Config()
+    config.MergeFromString(add_request.config.value)
+    assert len(config.rule) == 1
+    rule = config.rule[0]
     assert rule.rule_tag == "rule-1"  # Command's rule_tag wins over rule_json
     assert rule.tag == "out-1"
     assert list(rule.inbound_tag) == ["hopA-in-1"]
@@ -241,3 +270,190 @@ async def test_real_grpc_error_from_xray_propagates_not_swallowed():
     assert "tag already exists" in message
     # The original grpc.RpcError must be chained, not swallowed.
     assert isinstance(exc_info.value.__cause__, grpc.RpcError)
+
+
+# --- Real Xray-core integration tier -----------------------------------------
+#
+# See the module docstring for why this exists alongside the mock-based
+# tests above. Spins up a genuine ghcr.io/xtls/xray-core container (the same
+# image docker_manager.py manages in production) with its control API
+# exposed on loopback, runs XrayClient's real operations against it, and
+# tears the container down afterward -- skipped with a clear reason if no
+# real Docker Engine is reachable, the same pattern
+# tests/test_docker_manager.py uses for its real-Docker tier.
+
+_REAL_XRAY_CONTAINER_NAME = "dist-vpn-agent-test-xray-core-client"
+_REAL_XRAY_HOST_PORT = 19998
+
+
+def _real_xray_config(port: int) -> str:
+    # Minimal config exposing just the control API (dokodemo-door "api"
+    # inbound routed to the "api" outbound tag) -- the same shape used to
+    # manually verify this slice against a real binary (see final report).
+    return json.dumps(
+        {
+            "log": {"loglevel": "warning"},
+            "api": {"tag": "api", "services": ["HandlerService", "RoutingService", "StatsService"]},
+            "inbounds": [
+                {
+                    "listen": "0.0.0.0",
+                    "port": port,
+                    "protocol": "dokodemo-door",
+                    "settings": {"address": "127.0.0.1"},
+                    "tag": "api",
+                }
+            ],
+            "outbounds": [{"protocol": "freedom", "tag": "direct"}],
+            "routing": {"rules": [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]},
+        }
+    )
+
+
+@pytest.fixture
+def real_xray_address(tmp_path):
+    docker = pytest.importorskip("docker", reason="docker-py not installed")
+    from docker.errors import DockerException, NotFound  # noqa: PLC0415
+
+    try:
+        client = docker.from_env()
+        client.ping()
+    except DockerException as err:
+        pytest.skip(f"no real Docker Engine available in this environment: {err}")
+
+    try:
+        client.containers.get(_REAL_XRAY_CONTAINER_NAME).remove(force=True)
+    except NotFound:
+        pass
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(_real_xray_config(_REAL_XRAY_HOST_PORT))
+
+    container = client.containers.run(
+        "ghcr.io/xtls/xray-core:latest",
+        name=_REAL_XRAY_CONTAINER_NAME,
+        command=["run", "-config", "/etc/xray/config.json"],
+        volumes={str(config_path): {"bind": "/etc/xray/config.json", "mode": "ro"}},
+        ports={f"{_REAL_XRAY_HOST_PORT}/tcp": ("127.0.0.1", _REAL_XRAY_HOST_PORT)},
+        detach=True,
+    )
+    try:
+        yield f"127.0.0.1:{_REAL_XRAY_HOST_PORT}"
+    finally:
+        container.remove(force=True)
+
+
+async def _wait_until_ready(client: XrayClient, timeout: float = 15.0) -> None:
+    """Real Xray-core takes a moment to bind its API listener after the
+    container is technically 'running' -- retry a cheap, always-valid
+    operation (add+remove a freedom outbound) until it stops erroring, or
+    give up after ``timeout`` seconds.
+    """
+    deadline = time.monotonic() + timeout
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            await client.add_outbound(json.dumps({"tag": "readiness-probe", "protocol": "freedom", "settings": {}}))
+            await client.remove_outbound("readiness-probe")
+            return
+        except XrayClientError as err:
+            last_err = err
+            await asyncio.sleep(0.5)
+    raise AssertionError(f"real Xray-core never became ready within {timeout}s: {last_err}")
+
+
+@pytest.mark.asyncio
+async def test_real_xray_core_add_remove_inbound_all_transports(real_xray_address):
+    """The exact transport-registry-name translation this slice fixed
+    (raw->tcp, xhttp->splithttp, ws->websocket), against a real listener
+    registry -- this is precisely the class of bug the mock cannot catch,
+    since it fails at Xray's runtime listener lookup, not request shape.
+    """
+    client = XrayClient(real_xray_address)
+    await _wait_until_ready(client)
+    try:
+        for network, extra_settings in [
+            ("raw", {}),
+            ("xhttp", {"xhttpSettings": {"path": "/verify"}}),
+            ("ws", {"wsSettings": {"path": "/verify-ws"}}),
+        ]:
+            tag = f"verify-{network}"
+            inbound = {
+                "tag": tag,
+                "listen": "0.0.0.0",
+                "port": 21000 + hash(network) % 500,
+                "protocol": "vless",
+                "settings": {"users": [], "decryption": "none"},
+                "streamSettings": {"network": network, "security": "none", **extra_settings},
+            }
+            await client.add_inbound(json.dumps(inbound))
+            await client.remove_inbound(tag)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_xray_core_add_remove_user_via_alter_inbound(real_xray_address):
+    client = XrayClient(real_xray_address)
+    await _wait_until_ready(client)
+    try:
+        inbound = {
+            "tag": "verify-users",
+            "listen": "0.0.0.0",
+            "port": 21500,
+            "protocol": "vless",
+            "settings": {"users": [], "decryption": "none"},
+            "streamSettings": {"network": "raw", "security": "none"},
+        }
+        await client.add_inbound(json.dumps(inbound))
+        await client.add_user(
+            "verify-users", uuid="b831381d-6324-4d53-ad4f-8cda48b30811", email="verify@example.com", flow=""
+        )
+        await client.remove_user("verify-users", email="verify@example.com")
+        await client.remove_inbound("verify-users")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_xray_core_add_remove_outbound(real_xray_address):
+    client = XrayClient(real_xray_address)
+    await _wait_until_ready(client)
+    try:
+        await client.add_outbound(json.dumps({"tag": "verify-out", "protocol": "freedom", "settings": {}}))
+        await client.remove_outbound("verify-out")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_xray_core_add_remove_routing_rule(real_xray_address):
+    """Exercises the router.Config-wrapper fix (see add_routing_rule's
+    comment in xray_client.py) against real Router.AddRule -- without it
+    this fails with a real Xray error ("AddRule: config type error").
+    """
+    client = XrayClient(real_xray_address)
+    await _wait_until_ready(client)
+    try:
+        rule_json = json.dumps({"domain": [{"custom": {"type": "Domain", "value": "example.com"}}], "tag": "direct"})
+        await client.add_routing_rule("verify-rule", rule_json)
+        await client.remove_routing_rule("verify-rule")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_xray_core_override_balancer_surfaces_real_error(real_xray_address):
+    """No balancer is configured in the minimal test config, so this is
+    expected to fail -- the point is confirming the *real* Xray error
+    ("cannot find tag") comes through XrayClientError verbatim, proving the
+    wire request itself reached RoutingService.OverrideBalancerTarget and
+    was rejected by real Xray logic, not by translation-layer validation
+    (which would raise before ever calling the RPC).
+    """
+    client = XrayClient(real_xray_address)
+    await _wait_until_ready(client)
+    try:
+        with pytest.raises(XrayClientError, match="cannot find tag"):
+            await client.override_balancer("nonexistent-balancer", "direct")
+    finally:
+        await client.close()

@@ -409,8 +409,23 @@ class XrayClient:
         # so Add/Remove always agree on the tag.
         rule.rule_tag = rule_tag
 
+        # AddRuleRequest.config must be a TypedMessage wrapping a *router.Config*
+        # (the same top-level message the static config file's "routing" block
+        # deserializes into -- domain_strategy/rule/balancing_rule), NOT a bare
+        # RoutingRule -- confirmed by reading Router.AddRule in Xray-core's Go
+        # source (app/router/router.go): it does `inst.(*Config)` on the decoded
+        # TypedMessage and returns exactly the literal error this produced
+        # ("AddRule: config type error") for anything else, including a bare
+        # RoutingRule. Caught by testing against a real Xray-core container --
+        # the mock RoutingService in tests/mock_xray_server.py doesn't decode
+        # the TypedMessage payload, so it never would have caught this. One
+        # rule per call here (shouldAppend=True merges it into Xray's existing
+        # rule set rather than replacing it, so Config.rule doesn't need to
+        # carry Xray's *entire* current rule list on every add).
+        config = router_config_pb2.Config(rule=[rule])
+
         stub = routing_pb2_grpc.RoutingServiceStub(self._ensure_channel())
-        request = routing_pb2.AddRuleRequest(config=_typed_message(rule), shouldAppend=True)
+        request = routing_pb2.AddRuleRequest(config=_typed_message(config), shouldAppend=True)
         async with _translate_grpc_errors("RoutingService.AddRule"):
             await stub.AddRule(request)
 
