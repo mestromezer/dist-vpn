@@ -36,6 +36,7 @@ from collections.abc import Awaitable, Callable
 import grpc
 
 from dist_vpn_agent.config import AgentSettings, NodeRole, mask_secret
+from dist_vpn_agent.docker_manager import DockerManager
 from dist_vpn_agent.generated import agent_control_pb2 as pb2
 from dist_vpn_agent.generated import agent_control_pb2_grpc as pb2_grpc
 from dist_vpn_agent.xray_client import XrayClient, XrayClientError
@@ -100,7 +101,12 @@ class ControlClient:
     token again).
     """
 
-    def __init__(self, settings: AgentSettings, xray_client: XrayClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: AgentSettings,
+        xray_client: XrayClient | None = None,
+        docker_manager: DockerManager | None = None,
+    ) -> None:
         self._settings = settings
         self.node_id: str | None = None
         self._node_id_event = asyncio.Event()
@@ -108,6 +114,11 @@ class ControlClient:
         # see tests/mock_xray_server.py); defaults to the real local
         # Xray-core loopback address from settings.
         self._xray_client = xray_client if xray_client is not None else XrayClient(settings.xray_api_address)
+        # Overridable for tests (inject a fake/mock docker client via
+        # DockerManager(settings, client=...)); defaults to real Docker
+        # Engine API access. Used only to read health for the heartbeat --
+        # see main.py for where ensure_running() is actually called.
+        self._docker_manager = docker_manager if docker_manager is not None else DockerManager(settings)
 
     # -- channel / credentials -------------------------------------------------
 
@@ -178,15 +189,21 @@ class ControlClient:
             )
         )
 
-    def _build_heartbeat_message(self) -> pb2.AgentMessage:
-        # Real Docker/Xray health reporting lands with the Xray-management
-        # slice; this slice only exercises the control-plane round trip, so
-        # health is a placeholder.
+    async def _build_heartbeat_message(self) -> pb2.AgentMessage:
+        # docker_manager.health() talks to the (blocking, synchronous)
+        # docker-py client -- run it off the event loop thread so a slow or
+        # wedged Docker Engine API can't stall the heartbeat/read loops.
+        health = await asyncio.to_thread(self._docker_manager.health)
+        if health.status == "docker_unavailable":
+            logger.warning("heartbeat: Docker Engine API unreachable: %s", health.detail)
+        # cpu_percent/mem_percent/disk_percent remain placeholders -- see
+        # agent/README.md "Scope of this slice" (host resource sampling,
+        # e.g. via psutil, is a separate, not-yet-made dependency decision).
         return pb2.AgentMessage(
             heartbeat=pb2.Heartbeat(
                 node_id=self.node_id or "",
                 health=pb2.NodeHealth(
-                    xray_container_running=False,
+                    xray_container_running=health.running,
                     cpu_percent=0.0,
                     mem_percent=0.0,
                     disk_percent=0.0,
@@ -291,7 +308,7 @@ class ControlClient:
         await self._node_id_event.wait()
         while True:
             await asyncio.sleep(self._settings.heartbeat_interval_seconds)
-            await outbound.put(self._build_heartbeat_message())
+            await outbound.put(await self._build_heartbeat_message())
             logger.debug("sent heartbeat node_id=%s", self.node_id)
 
     # -- public API ----------------------------------------------------------

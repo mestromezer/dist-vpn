@@ -22,6 +22,7 @@ import pytest
 
 from dist_vpn_agent.config import AgentSettings, NodeRole
 from dist_vpn_agent.control_client import ControlClient, EnrollmentRejected
+from dist_vpn_agent.docker_manager import XrayContainerHealth
 from dist_vpn_agent.generated import agent_control_pb2 as pb2
 from dist_vpn_agent.xray_client import XrayClient
 from mock_platform_server import MockAgentControlServicer, running
@@ -43,12 +44,29 @@ def make_settings(address: str, **overrides) -> AgentSettings:
     return AgentSettings(**defaults)
 
 
+class _FakeDockerManager:
+    """Stand-in for DockerManager that never touches a real Docker Engine --
+    used by tests below that aren't about Docker/Xray-container health
+    specifically, so they stay hermetic and fast regardless of whether this
+    environment happens to have Docker running.
+    """
+
+    def __init__(self, running: bool = False) -> None:
+        self._running = running
+
+    def health(self) -> XrayContainerHealth:
+        return XrayContainerHealth(running=self._running, status="running" if self._running else "not_found")
+
+    def is_running(self) -> bool:
+        return self._running
+
+
 @pytest.mark.asyncio
 async def test_enrollment_heartbeat_ping_round_trip():
     servicer = MockAgentControlServicer(node_id="node-abc", accept=True)
 
     async with running(servicer) as address:
-        client = ControlClient(make_settings(address))
+        client = ControlClient(make_settings(address), docker_manager=_FakeDockerManager())
         session_task = asyncio.create_task(client.run_session())
         try:
             await asyncio.wait_for(servicer.heartbeat_received.wait(), timeout=5)
@@ -71,6 +89,29 @@ async def test_enrollment_heartbeat_ping_round_trip():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("xray_running", [True, False])
+async def test_heartbeat_reflects_real_docker_manager_health(xray_running):
+    # Heartbeat.health.xray_container_running used to be hardcoded False
+    # (this slice's whole point is that it now reflects docker_manager.py's
+    # real answer) -- exercise both a running and a not-running container.
+    servicer = MockAgentControlServicer(node_id="node-abc", accept=True)
+
+    async with running(servicer) as address:
+        client = ControlClient(
+            make_settings(address), docker_manager=_FakeDockerManager(running=xray_running)
+        )
+        session_task = asyncio.create_task(client.run_session())
+        try:
+            await asyncio.wait_for(servicer.heartbeat_received.wait(), timeout=5)
+        finally:
+            session_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await session_task
+
+    assert servicer.received_heartbeats[0].health.xray_container_running is xray_running
+
+
+@pytest.mark.asyncio
 async def test_run_test_command_returns_not_implemented_result():
     # RunTest is one of the two ops this slice deliberately leaves
     # unimplemented (see agent/README.md) -- unlike the six real ops below,
@@ -80,7 +121,7 @@ async def test_run_test_command_returns_not_implemented_result():
     servicer = MockAgentControlServicer(node_id="node-xyz", accept=True, send_command=command)
 
     async with running(servicer) as address:
-        client = ControlClient(make_settings(address))
+        client = ControlClient(make_settings(address), docker_manager=_FakeDockerManager())
         session_task = asyncio.create_task(client.run_session())
         try:
             await asyncio.wait_for(servicer.command_result_received.wait(), timeout=5)
@@ -110,7 +151,9 @@ async def test_add_user_command_dispatches_to_real_xray_client_and_succeeds():
         servicer = MockAgentControlServicer(node_id="node-xyz", accept=True, send_command=command)
 
         async with running(servicer) as platform_address:
-            client = ControlClient(make_settings(platform_address), xray_client=xray_client)
+            client = ControlClient(
+                make_settings(platform_address), xray_client=xray_client, docker_manager=_FakeDockerManager()
+            )
             session_task = asyncio.create_task(client.run_session())
             try:
                 await asyncio.wait_for(servicer.command_result_received.wait(), timeout=5)
@@ -148,7 +191,9 @@ async def test_add_inbound_command_reports_real_xray_error_not_swallowed():
         servicer = MockAgentControlServicer(node_id="node-xyz", accept=True, send_command=command)
 
         async with running(servicer) as platform_address:
-            client = ControlClient(make_settings(platform_address), xray_client=xray_client)
+            client = ControlClient(
+                make_settings(platform_address), xray_client=xray_client, docker_manager=_FakeDockerManager()
+            )
             session_task = asyncio.create_task(client.run_session())
             try:
                 await asyncio.wait_for(servicer.command_result_received.wait(), timeout=5)
@@ -181,7 +226,9 @@ async def test_unsupported_protocol_in_add_inbound_reports_translation_error():
         servicer = MockAgentControlServicer(node_id="node-xyz", accept=True, send_command=command)
 
         async with running(servicer) as platform_address:
-            client = ControlClient(make_settings(platform_address), xray_client=xray_client)
+            client = ControlClient(
+                make_settings(platform_address), xray_client=xray_client, docker_manager=_FakeDockerManager()
+            )
             session_task = asyncio.create_task(client.run_session())
             try:
                 await asyncio.wait_for(servicer.command_result_received.wait(), timeout=5)
@@ -202,7 +249,7 @@ async def test_enrollment_rejected_raises():
     servicer = MockAgentControlServicer(accept=False, reject_reason="token expired")
 
     async with running(servicer) as address:
-        client = ControlClient(make_settings(address))
+        client = ControlClient(make_settings(address), docker_manager=_FakeDockerManager())
         with pytest.raises(EnrollmentRejected):
             await asyncio.wait_for(client.run_session(), timeout=5)
 

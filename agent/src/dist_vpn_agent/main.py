@@ -1,8 +1,12 @@
 """Process entrypoint: run the control-plane client against Platform.
 
-This slice only wires up the Agent<->Platform gRPC channel (enrollment,
-heartbeat, ping, command-echo). It does not manage Xray or Docker yet --
-see agent/README.md for scope.
+Also ensures the local Xray-core container is up before starting the
+control-plane loop (docker_manager.py, TZ-4 SS5.4) -- deliberately
+independent of whether Platform is reachable: existing users may already be
+routed through a running Xray-core even during a Platform outage (TZ-4 SS4:
+"Agent должен переживать кратковременную потерю связи с Platform ... без
+падения локального Xray"), so this must not be gated on enrollment/session
+success.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from pydantic import ValidationError
 
 from dist_vpn_agent.config import AgentSettings
 from dist_vpn_agent.control_client import ControlClient
+from dist_vpn_agent.docker_manager import DockerManager, DockerManagerError
 from dist_vpn_agent.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -38,7 +43,23 @@ def main() -> None:
         settings.heartbeat_interval_seconds,
     )
 
-    client = ControlClient(settings)
+    docker_manager = DockerManager(settings)
+    try:
+        health = docker_manager.ensure_running()
+        logger.info(
+            "local Xray-core container %s: %s", settings.xray_container_name, health.status
+        )
+    except DockerManagerError:
+        # Explicit, loud self-diagnostic (TZ-4 SS7) rather than a silent
+        # hang -- but not fatal: the control-plane session should still
+        # come up and honestly report xray_container_running=False via the
+        # heartbeat rather than the whole process refusing to start.
+        logger.exception(
+            "could not ensure the local Xray-core container is running; continuing "
+            "anyway so Platform can at least see this node and its real (unhealthy) status"
+        )
+
+    client = ControlClient(settings, docker_manager=docker_manager)
     try:
         asyncio.run(client.run_forever())
     except KeyboardInterrupt:
