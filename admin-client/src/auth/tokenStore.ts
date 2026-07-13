@@ -34,6 +34,14 @@ interface StoredTokens {
 
 let tokens: StoredTokens | null = null;
 
+// Whether the current admin must change their password before doing anything
+// else (TokenPair.must_change_password — see contract/types.ts contract-drift
+// note). Tracked separately from `tokens` because it has its own lifecycle:
+// it's cleared by a successful POST /auth/change-password, not by a token
+// refresh, and a refresh response that omits the field should not be read as
+// "requirement lifted" (see setTokens below).
+let mustChangePasswordFlag = false;
+
 export function setTokens(pair: TokenPair): void {
   tokens = {
     accessToken: pair.access_token,
@@ -42,6 +50,23 @@ export function setTokens(pair: TokenPair): void {
     // would reject the token.
     expiresAt: Date.now() + Math.max(pair.expires_in - 10, 0) * 1000,
   };
+  // Only update the flag when the field is actually present in this
+  // response — /auth/refresh reuses the same TokenPair shape and it's not
+  // specified whether it re-sends must_change_password, so an absent field
+  // is treated as "unchanged" rather than implicitly false.
+  if (pair.must_change_password !== undefined) {
+    mustChangePasswordFlag = pair.must_change_password;
+  }
+}
+
+/** True if the signed-in admin must change their password before proceeding. */
+export function mustChangePassword(): boolean {
+  return mustChangePasswordFlag;
+}
+
+/** Called after a successful POST /auth/change-password. */
+export function clearMustChangePassword(): void {
+  mustChangePasswordFlag = false;
 }
 
 export function getAccessToken(): string | null {
@@ -58,6 +83,7 @@ export function isAccessTokenExpired(): boolean {
 
 export function clearTokens(): void {
   tokens = null;
+  mustChangePasswordFlag = false;
 }
 
 export function hasSession(): boolean {
