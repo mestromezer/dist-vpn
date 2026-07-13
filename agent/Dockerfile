@@ -1,9 +1,12 @@
 # dist-vpn Agent
 #
-# This slice packages only the control-plane gRPC client (Agent<->Platform
-# dial-out channel). Xray/Docker management lands in a follow-up slice and
-# will extend this image (e.g. mounting/using a Docker socket per TZ-4 SS5.4 --
-# that decision is deliberately not made yet).
+# Packages the control-plane gRPC client (Agent<->Platform dial-out channel)
+# together with real local Xray-core management (xray_client.py,
+# docker_manager.py -- TZ-4 SS3.2/SS5.4). The Agent process itself still runs
+# directly on the host's Docker context (docker.from_env(), see
+# docker_manager.py's module docstring for why) -- this image is the Agent
+# process, not something that additionally wraps/replaces the Docker socket
+# decision made there.
 #
 # IMPORTANT: build context is the *repository root*, not agent/, because this
 # build needs read access to contracts/proto/agent_control.proto (the Agent
@@ -22,32 +25,37 @@
 #     dist-vpn-agent:dev
 #
 # Run (production, mTLS): mount cert/key/CA and point the AGENT_MTLS_*_PATH
-# vars at them -- see agent/README.md.
+# vars at them -- see agent/README.md. Also needs access to the local Docker
+# Engine API (docker_manager.py) and to the local Xray-core control API
+# (xray_client.py, xray_api_address) -- both loopback/local-trust-boundary
+# concerns documented in those modules, not solved by this Dockerfile.
 
 FROM python:3.12-slim AS builder
 
 WORKDIR /build
 
+# Mirror the real repo layout under /build (agent/ next to contracts/) rather
+# than the ad hoc /tmp copy the control-plane-only slice used -- gen_proto.sh
+# resolves contracts/proto/ relative to its own location
+# (agent/scripts/../../contracts/proto), so this layout is what lets the same
+# script that's used (and tested) locally run unmodified at build time
+# instead of re-implementing/duplicating its protoc invocations here.
 COPY agent/pyproject.toml ./agent/pyproject.toml
 COPY agent/README.md ./agent/README.md
 COPY agent/src ./agent/src
-COPY contracts/proto/agent_control.proto /tmp/contracts_proto/agent_control.proto
+COPY agent/scripts ./agent/scripts
+COPY agent/vendor ./agent/vendor
+COPY contracts/proto/agent_control.proto ./contracts/proto/agent_control.proto
 
 WORKDIR /build/agent
 
-# Regenerate gRPC stubs from the contract at build time so the image never
-# depends on committed generated code (nothing generated is tracked in git).
+# Regenerate gRPC stubs (both agent_control.proto and the vendored
+# vendor/xray-proto/ tree) at build time so the image never depends on
+# committed generated code (nothing generated is tracked in git -- see
+# scripts/gen_proto.sh and vendor/xray-proto/README.md).
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir grpcio-tools \
- && mkdir -p src/dist_vpn_agent/generated \
- && python -m grpc_tools.protoc \
-      --proto_path=/tmp/contracts_proto \
-      --python_out=src/dist_vpn_agent/generated \
-      --grpc_python_out=src/dist_vpn_agent/generated \
-      agent_control.proto \
- && touch src/dist_vpn_agent/generated/__init__.py \
- && sed -i -E 's/^import ([A-Za-z_]+_pb2) as (.*)$/from . import \1 as \2/' \
-      src/dist_vpn_agent/generated/agent_control_pb2_grpc.py \
+ && bash scripts/gen_proto.sh \
  && pip wheel --no-cache-dir --wheel-dir /build/wheels .
 
 FROM python:3.12-slim

@@ -127,6 +127,10 @@ bash scripts/gen_proto.sh
 | `AGENT_MTLS_CLIENT_CERT_PATH` | *(нет)* | Путь к клиентскому mTLS-сертификату ноды. Опционален — см. ниже про bootstrap |
 | `AGENT_MTLS_CLIENT_KEY_PATH` | *(нет)* | Путь к приватному ключу клиента. Должен быть задан вместе с `..._CERT_PATH` (либо оба, либо ни одного) |
 | `AGENT_INSECURE_DEV_MODE` | `false` | Только для локальной разработки: небезопасный (без TLS) канал. **Никогда не включать в production** — см. предупреждение ниже |
+| `AGENT_XRAY_API_ADDRESS` | `127.0.0.1:10085` | `host:port` control API самого локального Xray-core (`HandlerService`/`RoutingService`/`StatsService`, `xray_client.py`). Только loopback/локальная доверенная граница — никогда не публикуется наружу |
+| `AGENT_XRAY_DOCKER_IMAGE` | `ghcr.io/xtls/xray-core:latest` | Образ (с тегом), из которого `docker_manager.py` создаёт/запускает контейнер Xray-core |
+| `AGENT_XRAY_CONTAINER_NAME` | `dist-vpn-xray-core` | Имя управляемого контейнера — `docker_manager.py` трогает **только** контейнер с этим именем (TZ-4 §5.4) |
+| `AGENT_XRAY_CONFIG_HOST_PATH` | `/etc/dist-vpn/xray-config.json` | Путь на хосте, монтируемый read-only в контейнер как `/etc/xray/config.json` |
 | `AGENT_LOG_LEVEL` | `INFO` | Уровень логирования |
 
 ### mTLS и bootstrap-нюанс
@@ -277,11 +281,27 @@ docker run --rm \
   dist-vpn-agent:dev
 ```
 
-Сборка образа и его запуск проверены вручную в рамках этого среза (`docker
-build` проходит, контейнер поднимается, логирует enrollment/переподключение
-структурированным JSON, токен маскируется в логах). Продакшн-запуск —
-смонтировать mTLS-материалы и задать `AGENT_MTLS_*_PATH` вместо
-insecure-режима. Образ двухстадийный: стадия сборки регенерирует gRPC-стабы
+Сборка образа и его запуск проверены вручную заново в этом под-срезе после
+того, как `Dockerfile` пришлось обновить: он до сих пор копировал в
+build-контекст только `agent_control.proto` и регенерировал стабы вручную
+инлайн-вызовом `protoc`, не зная ни про `vendor/xray-proto/`, ни про
+`scripts/gen_proto.sh` — с добавлением `xray_client.py`/`docker_manager.py`
+это привело бы к падению образа на импорте (`generated.xray.*` просто не
+существовал бы). Теперь стадия сборки копирует `agent/scripts` и
+`agent/vendor` и зеркалит реальную структуру репозитория (`contracts/proto/`
+рядом с `agent/`), так что при сборке выполняется тот же самый
+`scripts/gen_proto.sh`, что используется и тестируется локально — не
+отдельная, рассинхронизирующаяся копия его логики. Проверено: `docker build`
+проходит, контейнер поднимается, `docker_manager.ensure_running()` честно
+падает с понятной ошибкой (Docker-сокет не примонтирован в этот контейнер —
+осознанно, см. `docker_manager.py`) и это не роняет процесс (см. `main.py`),
+control-plane цикл логирует enrollment и переподключается с backoff
+(токен замаскирован в логах), как и должен себя вести без реальной Platform
+на другом конце. Продакшн-запуск — смонтировать mTLS-материалы и задать
+`AGENT_MTLS_*_PATH` вместо insecure-режима, и обеспечить доступ к Docker
+Engine API (см. `docker_manager.py`'s "Docker socket access decision") и к
+API самого Xray-core (`AGENT_XRAY_API_ADDRESS`). Образ двухстадийный: стадия
+сборки регенерирует gRPC-стабы (`agent_control.proto` и `vendor/xray-proto/`)
 и собирает wheel, финальный слой — чистый рантайм под непривилегированным
 пользователем `agent` (TZ-4 §5.3).
 
