@@ -15,13 +15,11 @@ import { authorizedFetchJson } from './auth/httpClient';
  * enough to not need ra-data-simple-rest as a base, so this adapter talks to
  * the contract directly instead of fighting the header-based convention.
  *
- * Scope for this slice: only the endpoints needed by the `nodes` resource
- * (list/show) are exercised end-to-end and manually verified. The other
- * methods follow the same REST conventions used elsewhere in the contract
- * (PATCH for update, POST for create, DELETE for delete) so that adding the
- * next <Resource> (cascades, users) mostly means pointing react-admin at it
- * rather than writing new plumbing - but they are untested until that
- * resource actually lands.
+ * Scope: the `nodes`, `cascades`, and `users` resources all exercise
+ * getList/getOne through this provider; `create`/`update`/`delete` are
+ * exercised by `users` (create/delete) and follow the same REST conventions
+ * used elsewhere in the contract (PATCH for update, POST for create, DELETE
+ * for delete) for the rest, pending a resource that actually needs them.
  */
 export const dataProvider: DataProvider = {
   getList: async (resource, params) => {
@@ -36,10 +34,12 @@ export const dataProvider: DataProvider = {
     );
     const items = body.items ?? [];
     if (body.total === undefined) {
-      // Contract gap, not a bug here: /cascades and /users list responses
-      // don't include a `total` field in openapi.yaml (only /nodes does),
-      // so react-admin can't compute an exact page count for them yet.
-      // Flagged to the contract owners rather than worked around silently.
+      // /nodes, /cascades, and /users all declare `total` on their list
+      // envelope in the current contract, so this should never fire against
+      // a spec-compliant server — kept as a defensive fallback (rather than
+      // a hard failure) in case a future resource's list endpoint omits it,
+      // with a loud warning so an undercounted page total doesn't go
+      // unnoticed silently.
       console.warn(
         `[dataProvider] "${resource}" list response has no "total" field; ` +
           'falling back to items.length, which undercounts total pages.',
