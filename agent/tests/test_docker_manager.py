@@ -82,9 +82,30 @@ def test_ensure_running_creates_container_when_missing(tmp_path):
     kwargs = client.containers.create.call_args.kwargs
     assert kwargs["name"] == "dist-vpn-xray-core-test"
     assert kwargs["command"] == ["run", "-config", "/etc/xray/config.json"]
-    assert kwargs["ports"] == {"10086/tcp": ("127.0.0.1", 10086)}
+    assert kwargs["ports"] == {
+        "10086/tcp": ("127.0.0.1", 10086),
+        f"{settings.xray_public_port}/tcp": ("0.0.0.0", settings.xray_public_port),
+    }
     created.start.assert_called_once()
     assert result.running is True
+
+
+def test_ensure_running_publishes_public_port_to_all_interfaces(tmp_path):
+    """The public (client/backhaul-facing) port must be published to 0.0.0.0, not
+    127.0.0.1 - unlike the loopback-only API port, real VLESS traffic has to arrive
+    from the public internet. Also confirms it uses the configured value, not a
+    hardcoded 443, when overridden."""
+    settings = make_settings(xray_config_host_path=tmp_path / "config.json", xray_public_port=8443)
+    client = MagicMock()
+    client.containers.get.side_effect = NotFound("no such container")
+    client.images.get.return_value = MagicMock()
+    client.containers.create.return_value = _fake_container("running")
+
+    manager = DockerManager(settings, client=client)
+    manager.ensure_running()
+
+    kwargs = client.containers.create.call_args.kwargs
+    assert kwargs["ports"]["8443/tcp"] == ("0.0.0.0", 8443)
 
 
 def test_ensure_running_pulls_image_when_not_present_locally(tmp_path):
@@ -233,6 +254,14 @@ def test_real_docker_engine_create_start_stop_restart_cycle(tmp_path, real_docke
         xray_container_name=_TEST_CONTAINER_NAME,
         xray_docker_image="ghcr.io/xtls/xray-core:latest",
         xray_api_address="127.0.0.1:19999",
+        # Avoid binding the real, possibly-privileged/in-use default (443) on the
+        # machine actually running this integration test - same reasoning as
+        # xray_api_address's override above, applied to the newer public-port mapping.
+        # 19998 specifically collides with test_xray_client.py's own
+        # _REAL_XRAY_HOST_PORT (a real, observed conflict when both real-Docker
+        # integration tests ran in the same session, not a hypothetical) - 19997
+        # doesn't appear anywhere else in this test suite.
+        xray_public_port=19997,
         xray_config_host_path=config_path,
     )
 

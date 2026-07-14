@@ -39,7 +39,14 @@ own auth) -- flagged here, not solved.
 The Xray-core container's control-API port (``xray_api_address`` in
 config.py) is published to the *host's* loopback interface only
 (``127.0.0.1:<port>``, never ``0.0.0.0``), consistent with xray_client.py's
-own "loopback-only, local trust boundary" reasoning.
+own "loopback-only, local trust boundary" reasoning. A second port
+(``xray_public_port``, default 443) is published to ``0.0.0.0`` at the same
+time - this is deliberately *not* loopback, since it is where real client/
+backhaul VLESS traffic (Hop A/Hop B, added later via ``AddInbound`` - see
+``xray_client.py``) must actually arrive from the public internet. Both
+mappings are fixed at container-creation time because Docker cannot add port
+publishing to an already-running container, and inbounds are added well
+after the container starts.
 """
 
 from __future__ import annotations
@@ -183,6 +190,7 @@ class DockerManager:
 
         host, _, port = self._settings.xray_api_address.rpartition(":")
         host = host or "127.0.0.1"
+        public_port = self._settings.xray_public_port
 
         try:
             return client.containers.create(
@@ -195,9 +203,17 @@ class DockerManager:
                         "mode": "ro",
                     }
                 },
-                # Loopback-only publish, matching xray_client.py's "local
-                # trust boundary" reasoning -- see module docstring.
-                ports={f"{port}/tcp": (host, int(port))},
+                ports={
+                    # Loopback-only publish, matching xray_client.py's "local
+                    # trust boundary" reasoning -- see module docstring.
+                    f"{port}/tcp": (host, int(port)),
+                    # Client/backhaul-facing (0.0.0.0) - must be published now, at
+                    # container-creation time, even though no inbound actually listens
+                    # on it yet (Hop A/B inbounds are added later via AddInbound) -
+                    # Docker cannot add port publishing to an already-running container.
+                    # See AgentSettings.xray_public_port's docstring for why this exists.
+                    f"{public_port}/tcp": ("0.0.0.0", public_port),
+                },
                 restart_policy={"Name": "unless-stopped"},
                 detach=True,
             )

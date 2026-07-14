@@ -142,6 +142,21 @@ class AgentSettings(BaseSettings):
         default=Path("/etc/dist-vpn/xray-config.json"),
         description="Host path mounted read-only into the container as /etc/xray/config.json.",
     )
+    # Client/backhaul-facing port to publish (0.0.0.0) on the Xray-core container at
+    # creation time - found missing while validating a real two-VDS deployment: unlike
+    # xray_api_address above (loopback, published at creation, fine), the Hop A/Hop B
+    # inbounds this Agent adds *after* the container is already running via AddInbound
+    # (control_client.py -> xray_client.py) are never published to the host at all
+    # unless a `-p` mapping for that port existed when the container was *created* -
+    # Docker cannot add port publishing to an already-running container. Defaults to
+    # 443, matching the Platform side's current single-port convention
+    # (platform/src/dist_vpn_platform/services/xray_templates.py::HOP_LISTEN_PORT) -
+    # both must agree, since neither side is aware of the other's port choice at
+    # runtime (see platform/README.md TODO on making the preset port configurable).
+    xray_public_port: int = Field(
+        default=443,
+        description="Host port (0.0.0.0) published on the Xray-core container for client/backhaul VLESS traffic.",
+    )
 
     # --- Logging ---
     log_level: str = Field(default="INFO")
