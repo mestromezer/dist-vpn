@@ -32,19 +32,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import grpc
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from dist_vpn_platform.db import session_scope
 from dist_vpn_platform.generated import agent_control_pb2 as pb
 from dist_vpn_platform.generated import agent_control_pb2_grpc as pb_grpc
 from dist_vpn_platform.models.base import as_aware_utc
+from dist_vpn_platform.models.cascade import Cascade
 from dist_vpn_platform.models.enrollment_token import EnrollmentToken
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
+from dist_vpn_platform.models.node_resource_sample import NodeResourceSample
 from dist_vpn_platform.models.usage_stat import UsageStat
-from dist_vpn_platform.models.user import User
+from dist_vpn_platform.models.user import User, UserCascade
+from dist_vpn_platform.models.user_device_kick_event import UserDeviceKickEvent
 from dist_vpn_platform.security import mtls_ca
 from dist_vpn_platform.security.enrollment_tokens import hash_token
+from dist_vpn_platform.services import xray_templates as xray
 from dist_vpn_platform.services.event_bus import publish_health_event
 
 logger = logging.getLogger(__name__)
@@ -383,6 +387,35 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             ):
                 node.status = NodeStatus.HEALTHY
 
+            # NodeResourceSample: one row per heartbeat, historizing what the
+            # cpu_percent/mem_percent/disk_percent columns above only ever hold as a
+            # single latest-value snapshot - see that model's own docstring, including
+            # the explicit "no retention/pruning yet, rows grow unbounded" caveat.
+            # online_user_count/online_device_count come from _handle_user_online's
+            # cache on this same Node row (may be stale if TelemetryReport hasn't
+            # arrived yet this cycle, or ever, for a brand-new node - not a bug, see
+            # that method's docstring).
+            provisioned_user_count = (
+                await db.execute(
+                    select(func.count(func.distinct(UserCascade.user_id)))
+                    .select_from(UserCascade)
+                    .join(Cascade, Cascade.id == UserCascade.cascade_id)
+                    .where(Cascade.entry_node_id == node.id)
+                )
+            ).scalar_one()
+            db.add(
+                NodeResourceSample(
+                    node_id=node.id,
+                    sampled_at=node.last_heartbeat_at,
+                    cpu_percent=node.cpu_percent,
+                    mem_percent=node.mem_percent,
+                    disk_percent=node.disk_percent,
+                    provisioned_user_count=provisioned_user_count,
+                    online_user_count=node.last_online_user_count,
+                    online_device_count=node.last_online_device_count,
+                )
+            )
+
             await db.flush()
 
             if node.status != previous_status:
@@ -452,7 +485,123 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                     if user_id is not None:
                         row.user_id = user_id
 
+        await self._handle_user_online(telemetry)
+
         logger.info(
             "telemetry_ingested",
             extra={"node_id": telemetry.node_id, "counters": len(telemetry.counters)},
         )
+
+    async def _handle_user_online(self, telemetry: pb.TelemetryReport) -> None:
+        """Processes TelemetryReport.user_online (Agent's per-node view of currently-
+        connected device IPs, via StatsService - see agent/src/dist_vpn_agent/
+        xray_client.py::get_users_stats): caches a live-ish device count on each
+        known User, and kicks (RemoveUser+AddUser, forcing every device to
+        reconnect) any user whose reported online-IP count on THIS node exceeds
+        their User.max_devices.
+
+        --- Scope boundary: per-node, not a cross-node aggregate limit ---
+
+        Each TelemetryReport only reflects what ONE node's Xray-core sees - a user
+        granted access to multiple cascades on different entry nodes could stay
+        under max_devices on every individual node while exceeding it in aggregate
+        across all of them combined. Enforcing a true global limit would need
+        aggregating recent reports across every node a user has access to (a shared
+        cache or cross-report query this slice doesn't build) - this is a known,
+        documented limitation, not an overlooked edge case: TZ-5's device-limit
+        requirement doesn't specify per-node vs. global, and per-node is what's
+        directly measurable from what Xray-core itself reports, without inventing
+        cross-node state Platform doesn't otherwise need.
+        """
+        kicks: list[tuple[User, int]] = []
+        node_online_users = 0
+        node_online_devices = 0
+
+        async with session_scope() as db:
+            for online_stat in telemetry.user_online:
+                resolved = await db.execute(select(User).where(User.uuid == online_stat.email))
+                user = resolved.scalar_one_or_none()
+                if user is None:
+                    continue
+
+                online_count = len(online_stat.online_ips)
+                user.last_online_device_count = online_count
+                user.last_online_at = datetime.fromtimestamp(telemetry.timestamp_unix, tz=timezone.utc)
+                if online_count:
+                    node_online_users += 1
+                    node_online_devices += online_count
+
+                if user.max_devices is not None and online_count > user.max_devices:
+                    db.add(
+                        UserDeviceKickEvent(
+                            user_id=user.id,
+                            node_id=telemetry.node_id,
+                            online_ip_count=online_count,
+                            max_devices=user.max_devices,
+                        )
+                    )
+                    kicks.append((user, online_count))
+
+            # Cached for _handle_heartbeat's NodeResourceSample writes - see Node's
+            # own docstring for why this can't just be computed at heartbeat-time
+            # from User rows directly (a User's online count isn't node-scoped).
+            node = await db.get(Node, telemetry.node_id)
+            if node is not None:
+                node.last_online_user_count = node_online_users
+                node.last_online_device_count = node_online_devices
+
+            await db.flush()
+            # Capture what dispatch needs before the session (and its identity map)
+            # closes at this `async with` block's exit - id()/uuid values, not ORM
+            # objects, so nothing below touches a detached instance.
+            kick_ids = [(u.id, u.uuid, count) for u, count in kicks]
+
+        for user_id, user_uuid, online_count in kick_ids:
+            await self._kick_user_devices(user_id, user_uuid, telemetry.node_id)
+            logger.warning(
+                "user_device_limit_kicked",
+                extra={
+                    "user_id": user_id,
+                    "node_id": telemetry.node_id,
+                    "online_ip_count": online_count,
+                },
+            )
+
+    async def _kick_user_devices(self, user_id: str, user_uuid: str, node_id: str) -> None:
+        """Forces every current device of `user_uuid` to reconnect, on every cascade
+        this user has access to whose entry node is `node_id` - RemoveUser then
+        AddUser back-to-back on the same inbound_tag(s), reusing the exact commands
+        api/routes/users.py already dispatches for revoke/grant, just triggered here
+        instead of by an admin action. Best-effort per cascade (mirrors
+        api/command_dispatch.py's dispatch_best_effort, not reused directly to avoid
+        importing api/ from grpc_server/ - see that module's own docstring for the
+        layering reason)."""
+        async with session_scope() as db:
+            stmt = (
+                select(Cascade)
+                .join(UserCascade, UserCascade.cascade_id == Cascade.id)
+                .where(UserCascade.user_id == user_id, Cascade.entry_node_id == node_id)
+            )
+            cascades = (await db.execute(stmt)).scalars().all()
+            cascade_ids = [c.id for c in cascades]
+
+        for cascade_id in cascade_ids:
+            inbound_tag = xray.hopa_inbound_tag(cascade_id)
+            for command in (
+                pb.Command(
+                    command_id=new_command_id(),
+                    remove_user=pb.RemoveUser(inbound_tag=inbound_tag, email=user_uuid),
+                ),
+                pb.Command(
+                    command_id=new_command_id(),
+                    add_user=pb.AddUser(inbound_tag=inbound_tag, uuid=user_uuid, email=user_uuid, flow=""),
+                ),
+            ):
+                try:
+                    await dispatch_command(node_id, command)
+                except (NodeNotConnectedError, CommandDispatchTimeoutError) as err:
+                    logger.warning(
+                        "user_device_kick_dispatch_failed",
+                        extra={"user_id": user_id, "node_id": node_id, "cascade_id": cascade_id, "error": str(err)},
+                    )
+                    break  # don't AddUser back if RemoveUser itself never landed
