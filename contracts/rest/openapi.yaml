@@ -178,6 +178,29 @@ paths:
       responses:
         "202": { description: "Принято, переконфигурация связанных каскадов запущена асинхронно" }
 
+  /nodes/{node_id}/resource-samples:
+    # Добавлено после реализации Platform (тот же паттерн, что и /auth/change-password
+    # выше) — временной ряд cpu/mem/disk vs. количество пользователей/устройств для
+    # анализа затрат ресурсов, один сэмпл на каждый Heartbeat. Раньше Node хранил
+    # только последнее значение — истории не было вообще.
+    parameters:
+      - { name: node_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Временной ряд использования ресурсов ноды и количества пользователей/устройств
+      parameters:
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 100 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/NodeResourceSample" } }
+                  total: { type: integer }
+
   /cascades:
     get:
       summary: Список каскадов
@@ -335,10 +358,47 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
+    patch:
+      # Добавлено после реализации Platform (тот же паттерн, что и PATCH /nodes/{id}
+      # выше) - ограничение количества устройств на пользователя (ТЗ-5 §4.4) требует
+      # способа это ограничение задать/изменить админом.
+      summary: Изменить max_devices пользователя (явный null = без ограничения)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                max_devices: { type: integer, nullable: true }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
     delete:
       summary: Отозвать доступ пользователя (см. TZ-5 §4.4)
       responses:
         "204": { description: OK }
+
+  /users/{user_id}/device-events:
+    # Добавлено после реализации Platform - журнал принудительных реконнектов при
+    # превышении max_devices (см. Platform-README "Отклонения от ТЗ").
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: История срабатываний лимита устройств для пользователя
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 25 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/UserDeviceKickEvent" } }
+                  total: { type: integer }
 
   /users/{user_id}/connection/{cascade_id}:
     # Добавлено после реализации Platform (тот же паттерн, что и /auth/change-password
@@ -495,8 +555,45 @@ components:
         name: { type: string }
         uuid: { type: string, description: "Личный VLESS-идентификатор пользователя, не меняется при ротации сервера" }
         cascade_ids: { type: array, items: { type: string } }
+        max_devices:
+          type: integer
+          nullable: true
+          description: >-
+            Максимум одновременно подключённых устройств (по онлайн-IP из Xray
+            StatsService, см. TelemetryReport.user_online в agent_control.proto).
+            null = без ограничения. Добавлено после реализации Platform, см.
+            "Отклонения от ТЗ" — при превышении Platform принудительно
+            переподключает все устройства (RemoveUser+AddUser) и пишет
+            UserDeviceKickEvent.
+        last_online_device_count:
+          type: integer
+          description: "Кэш из последнего TelemetryReport с этим пользователем — не гарантированно свежее значение."
+        last_online_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
         revoked_at: { type: string, format: date-time, nullable: true }
+
+    UserDeviceKickEvent:
+      type: object
+      description: "Аудит принудительных переподключений при превышении User.max_devices."
+      properties:
+        id: { type: string }
+        node_id: { type: string }
+        online_ip_count: { type: integer }
+        max_devices: { type: integer }
+        kicked_at: { type: string, format: date-time }
+
+    NodeResourceSample:
+      type: object
+      description: "Один сэмпл на Heartbeat — временной ряд, в отличие от Node.cpu_percent/etc., хранящих только последнее значение."
+      properties:
+        id: { type: string }
+        sampled_at: { type: string, format: date-time }
+        cpu_percent: { type: number }
+        mem_percent: { type: number }
+        disk_percent: { type: number }
+        provisioned_user_count: { type: integer, description: "Кол-во пользователей с доступом к каскадам этой ноды (запрос к БД)" }
+        online_user_count: { type: integer, description: "Кол-во пользователей, реально онлайн по последней телеметрии" }
+        online_device_count: { type: integer, description: "Суммарное кол-во онлайн-устройств по последней телеметрии" }
 
     UsageStat:
       type: object
