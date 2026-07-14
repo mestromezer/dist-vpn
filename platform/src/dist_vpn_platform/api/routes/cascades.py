@@ -39,8 +39,14 @@ from dist_vpn_platform.models.cascade import Cascade, CascadeExitNode, CascadeSt
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.link_test import LinkTest
 from dist_vpn_platform.models.node import Node
-from dist_vpn_platform.models.user import UserCascade
-from dist_vpn_platform.schemas.cascades import CascadeInput, CascadeListResponse, CascadeOut
+from dist_vpn_platform.models.user import User, UserCascade
+from dist_vpn_platform.schemas.cascades import (
+    CascadeInput,
+    CascadeListResponse,
+    CascadeMigrateUsersRequest,
+    CascadeMigrateUsersResponse,
+    CascadeOut,
+)
 from dist_vpn_platform.schemas.tests import LinkTestListResponse, LinkTestOut, LinkTestStartResponse
 from dist_vpn_platform.security import reality_keys
 from dist_vpn_platform.services import link_tests
@@ -322,6 +328,100 @@ async def delete_cascade(
     await db.commit()
 
     audit_logger.info("cascade_deleted", extra={"admin_id": admin.id, "cascade_id": cascade_id})
+
+
+@router.post("/{cascade_id}/migrate-users", response_model=CascadeMigrateUsersResponse)
+async def migrate_cascade_users(
+    cascade_id: str,
+    body: CascadeMigrateUsersRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminAccount = Depends(require_admin),
+) -> CascadeMigrateUsersResponse:
+    """The admin-triggered half of failover (TZ-5 §4.3 "перенаправлять подключения
+    при обрыве на доступные сервера"): services/health_scheduler.py auto-detects a
+    DOWN cascade (entry node heartbeat timeout) and marks it as such, but *choosing*
+    which other cascade should take over is a judgment call this slice deliberately
+    leaves to the admin, not automated - a scheduler picking a "healthy-looking"
+    replacement on its own risks mass-migrating users onto a cascade the admin
+    would not have chosen (wrong region, wrong provider, mid-maintenance, ...).
+
+    Moves every user currently on `cascade_id` onto `to_cascade_id`: RemoveUser on
+    the old cascade's entry node (best-effort courtesy cleanup - if that node is
+    genuinely down, as the typical failover scenario implies, this simply won't
+    land, which is fine, nothing depends on it succeeding) + AddUser on the new
+    cascade's entry node (the one dispatch that actually matters), then updates the
+    UserCascade rows to match. Does NOT require `cascade_id` to actually be DOWN -
+    an admin might migrate for planned maintenance too - and does NOT delete or
+    otherwise touch the source cascade itself, only its User memberships.
+    """
+    if body.to_cascade_id == cascade_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "to_cascade_id must differ from cascade_id")
+
+    from_cascade = await db.get(Cascade, cascade_id)
+    if from_cascade is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"cascade not found: {cascade_id}")
+    to_cascade = await db.get(Cascade, body.to_cascade_id)
+    if to_cascade is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"target cascade not found: {body.to_cascade_id}")
+
+    stmt = (
+        select(UserCascade)
+        .where(UserCascade.cascade_id == cascade_id)
+        .options(selectinload(UserCascade.user))
+    )
+    links = (await db.execute(stmt)).scalars().all()
+
+    migrated = 0
+    for link in links:
+        user: User = link.user
+
+        await dispatch_best_effort(
+            from_cascade.entry_node_id,
+            pb.Command(
+                command_id=new_command_id(),
+                remove_user=pb.RemoveUser(inbound_tag=xray.hopa_inbound_tag(cascade_id), email=user.uuid),
+            ),
+            context=f"migrate user {user.id} off cascade {cascade_id}",
+        )
+        add_ok = await dispatch_best_effort(
+            to_cascade.entry_node_id,
+            pb.Command(
+                command_id=new_command_id(),
+                add_user=pb.AddUser(
+                    inbound_tag=xray.hopa_inbound_tag(to_cascade.id), uuid=user.uuid, email=user.uuid, flow=""
+                ),
+            ),
+            context=f"migrate user {user.id} onto cascade {to_cascade.id}",
+        )
+        if not add_ok:
+            logger.warning(
+                "cascade_migrate_add_user_failed",
+                extra={"user_id": user.id, "from_cascade_id": cascade_id, "to_cascade_id": to_cascade.id},
+            )
+
+        await db.delete(link)
+        # A user might already have standing access to the target cascade (e.g. was
+        # deliberately granted both as a pre-existing backup) - UserCascade's
+        # composite primary key (user_id, cascade_id) would reject a duplicate row.
+        existing_target_link = await db.get(UserCascade, (user.id, to_cascade.id))
+        if existing_target_link is None:
+            db.add(UserCascade(user_id=user.id, cascade_id=to_cascade.id))
+        migrated += 1
+
+    await db.commit()
+
+    audit_logger.info(
+        "cascade_users_migrated",
+        extra={
+            "admin_id": admin.id,
+            "cascade_id": cascade_id,
+            "to_cascade_id": to_cascade.id,
+            "migrated_user_count": migrated,
+        },
+    )
+    return CascadeMigrateUsersResponse(
+        cascade_id=cascade_id, to_cascade_id=to_cascade.id, migrated_user_count=migrated
+    )
 
 
 @router.get("/{cascade_id}/events")

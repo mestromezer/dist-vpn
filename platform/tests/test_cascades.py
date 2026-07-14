@@ -26,6 +26,16 @@ def _auth_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _create_cascade(client: AsyncClient, token: str, entry_node_id: str) -> str:
+    response = await client.post(
+        "/cascades",
+        json={"entry_node_id": entry_node_id, "exit_node_ids": []},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
 async def _create_offline_node(role: NodeRole) -> str:
     """A Node row that exists in the DB but has no live AgentControl session -
     simulates a temporarily disconnected Agent for the DEGRADED-status test below."""
@@ -209,3 +219,133 @@ async def test_get_missing_cascade_is_404(client: AsyncClient, seeded_admin: dic
     token = await _login(client, seeded_admin)
     response = await client.get("/cascades/does-not-exist", headers=_auth_headers(token))
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_migrate_users_real_dispatch_and_membership_swap(client: AsyncClient, seeded_admin: dict) -> None:
+    """The admin-triggered half of failover (TZ-5 §4.3): real RemoveUser on the old
+    cascade's (connected) entry agent, real AddUser on the new one, and the
+    UserCascade rows actually swapped - not just an HTTP 200."""
+    old_entry_agent = FakeAgent()
+    new_entry_agent = FakeAgent()
+    try:
+        old_entry_id = await old_entry_agent.connect(NodeRole.ENTRY)
+        new_entry_id = await new_entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+
+        old_cascade_response = await client.post(
+            "/cascades", json={"entry_node_id": old_entry_id, "exit_node_ids": []}, headers=_auth_headers(token)
+        )
+        old_cascade_id = old_cascade_response.json()["id"]
+        new_cascade_response = await client.post(
+            "/cascades", json={"entry_node_id": new_entry_id, "exit_node_ids": []}, headers=_auth_headers(token)
+        )
+        new_cascade_id = new_cascade_response.json()["id"]
+
+        user_response = await client.post(
+            "/users", json={"name": "migrant", "cascade_ids": [old_cascade_id]}, headers=_auth_headers(token)
+        )
+        user_id = user_response.json()["id"]
+        user_uuid = user_response.json()["uuid"]
+        old_entry_agent.received_commands.clear()  # drop the cascade-creation/AddUser noise
+
+        response = await client.post(
+            f"/cascades/{old_cascade_id}/migrate-users",
+            json={"to_cascade_id": new_cascade_id},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["cascade_id"] == old_cascade_id
+        assert body["to_cascade_id"] == new_cascade_id
+        assert body["migrated_user_count"] == 1
+
+        old_ops = [c.WhichOneof("op") for c in old_entry_agent.received_commands]
+        assert old_ops == ["remove_user"]
+        assert old_entry_agent.received_commands[0].remove_user.email == user_uuid
+
+        new_ops = [c.WhichOneof("op") for c in new_entry_agent.received_commands]
+        assert "add_user" in new_ops
+        add_cmd = next(c for c in new_entry_agent.received_commands if c.WhichOneof("op") == "add_user")
+        assert add_cmd.add_user.email == user_uuid
+        assert add_cmd.add_user.uuid == user_uuid
+
+        get_response = await client.get(f"/users/{user_id}", headers=_auth_headers(token))
+        assert get_response.json()["cascade_ids"] == [new_cascade_id]
+    finally:
+        await old_entry_agent.close()
+        await new_entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_migrate_users_same_cascade_is_400(client: AsyncClient, seeded_admin: dict) -> None:
+    entry_agent = FakeAgent()
+    try:
+        entry_id = await entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+        cascade_id = await _create_cascade(client, token, entry_id)
+
+        response = await client.post(
+            f"/cascades/{cascade_id}/migrate-users",
+            json={"to_cascade_id": cascade_id},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 400
+    finally:
+        await entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_migrate_users_missing_source_cascade_is_404(client: AsyncClient, seeded_admin: dict) -> None:
+    entry_agent = FakeAgent()
+    try:
+        entry_id = await entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+        target_cascade_id = await _create_cascade(client, token, entry_id)
+
+        response = await client.post(
+            "/cascades/does-not-exist/migrate-users",
+            json={"to_cascade_id": target_cascade_id},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 404
+    finally:
+        await entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_migrate_users_missing_target_cascade_is_404(client: AsyncClient, seeded_admin: dict) -> None:
+    entry_agent = FakeAgent()
+    try:
+        entry_id = await entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+        source_cascade_id = await _create_cascade(client, token, entry_id)
+
+        response = await client.post(
+            f"/cascades/{source_cascade_id}/migrate-users",
+            json={"to_cascade_id": "does-not-exist"},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 404
+    finally:
+        await entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_migrate_users_with_no_users_on_source_is_a_no_op(client: AsyncClient, seeded_admin: dict) -> None:
+    entry_agent = FakeAgent()
+    try:
+        entry_id = await entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+        source_cascade_id = await _create_cascade(client, token, entry_id)
+        target_cascade_id = await _create_cascade(client, token, entry_id)
+
+        response = await client.post(
+            f"/cascades/{source_cascade_id}/migrate-users",
+            json={"to_cascade_id": target_cascade_id},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 200
+        assert response.json()["migrated_user_count"] == 0
+    finally:
+        await entry_agent.close()

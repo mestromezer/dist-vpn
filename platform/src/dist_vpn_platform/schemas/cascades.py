@@ -36,3 +36,18 @@ class CascadeListResponse(BaseModel):
     # platform/README.md "Отклонения от ТЗ"), added for parity with /nodes' list
     # response (which already has `total` in the contract).
     total: int
+
+
+class CascadeMigrateUsersRequest(BaseModel):
+    """See api/routes/cascades.py POST /cascades/{cascade_id}/migrate-users - the
+    admin-triggered half of failover (TZ-5 §4.3 "перенаправлять подключения при
+    обрыве"): auto-detection (services/health_scheduler.py) marks a cascade DOWN,
+    the admin picks a specific healthy replacement and this moves every user over."""
+
+    to_cascade_id: str
+
+
+class CascadeMigrateUsersResponse(BaseModel):
+    cascade_id: str
+    to_cascade_id: str
+    migrated_user_count: int
