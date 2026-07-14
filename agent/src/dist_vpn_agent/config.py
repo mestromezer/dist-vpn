@@ -73,6 +73,28 @@ class AgentSettings(BaseSettings):
     reconnect_backoff_initial_seconds: float = Field(default=1.0, gt=0)
     reconnect_backoff_max_seconds: float = Field(default=30.0, gt=0)
 
+    # --- Persisted node identity (identity.py; see agent/README.md's "mTLS-
+    # identity: bootstrap CSR, persisted reconnect" section for the full
+    # design) ---
+    # Directory the Agent persists its self-generated mTLS client keypair +
+    # issued certificate + assigned node_id to, once EnrollmentAck returns a
+    # signed certificate (see identity.py). Checked on every ``run_session()``
+    # (fresh process start *or* in-process reconnect) before falling back to
+    # bootstrap-enrollment with ``enrollment_token``. Default matches this
+    # Agent's actual deployment target (TZ-4 SS5.3: a Linux container/host,
+    # run as a dedicated non-root user) -- ``/var/lib/<service-name>`` is the
+    # conventional Linux location for a service's own persistent local state,
+    # analogous to e.g. ``/var/lib/docker`` or ``/var/lib/postgresql``. Not
+    # ``/etc`` (that's for operator-supplied config, e.g.
+    # ``xray_config_host_path`` below) and not ``/tmp`` (must survive
+    # reboots). Must be writable by the Agent's process user; the directory
+    # itself is created on first use if missing (see identity.py
+    # persist_identity).
+    state_dir: Path = Field(
+        default=Path("/var/lib/dist-vpn-agent"),
+        description="Directory for persisted node identity (mTLS client key+cert+node_id, see identity.py).",
+    )
+
     # --- mTLS (TZ-4 SS5.2) ---
     # mtls_ca_cert_path is required (unless insecure_dev_mode) so the Agent can
     # always authenticate Platform's server certificate. mtls_client_cert_path /

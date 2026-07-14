@@ -69,6 +69,16 @@ WORKDIR /app
 COPY --from=builder /build/wheels /wheels
 RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
 
+# AgentSettings.state_dir (identity.py, see agent/README.md's "mTLS-
+# идентичность" section) defaults to /var/lib/dist-vpn-agent -- a real
+# writable directory the *host* running this Agent needs, not something
+# provisioned by pip. /var/lib is root-owned by default; without this, the
+# first successful bootstrap enrollment would fail to persist its issued
+# identity to disk (PermissionError) even though enrollment itself
+# succeeded server-side -- found and fixed in the same slice that
+# introduced AGENT_STATE_DIR, not left as a landmine for later.
+RUN mkdir -p /var/lib/dist-vpn-agent && chown agent:agent /var/lib/dist-vpn-agent
+
 USER agent
 
 ENV AGENT_LOG_LEVEL=INFO
