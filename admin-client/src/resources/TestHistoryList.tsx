@@ -1,14 +1,28 @@
 import { useEffect, useState } from 'react';
 import { Alert, Box, Typography } from '@mui/material';
-import { Datagrid, DateField, FunctionField, ListContextProvider, TextField, useList, useRecordContext } from 'react-admin';
+import {
+  Datagrid,
+  DateField,
+  FunctionField,
+  ListContextProvider,
+  Pagination,
+  TextField,
+  useRecordContext,
+} from 'react-admin';
+import type { ListControllerResult } from 'react-admin';
 import type { Cascade, LinkTest } from '../contract/types';
 import { authorizedFetchJson } from '../auth/httpClient';
 import { describeTestOutcome } from './testOutcome';
 
-// Generous enough that pagination controls aren't needed for this slice (see
-// the "simple list" scope note below) while still bounding the request —
-// this endpoint has no documented upper limit on page_size in the contract.
-const HISTORY_PAGE_SIZE = 100;
+// Matches GET /cascades/{id}/tests's own contract default (openapi.yaml).
+const PAGE_SIZE = 25;
+
+// The endpoint always orders most-recent-first server-side (see
+// list_cascade_tests in platform/api/routes/cascades.py) and takes no sort
+// param - this is a fixed label for <Datagrid>'s column, not a real toggle.
+const FIXED_SORT = { field: 'created_at', order: 'DESC' as const };
+
+const noop = () => {};
 
 /**
  * Test-request history for a cascade (TZ-6 §3.2 "таблица истории"; TZ-5
@@ -27,16 +41,17 @@ const HISTORY_PAGE_SIZE = 100;
  * (`/tests?cascade_id=...`) `dataProvider.getManyReference` assumes for
  * every resource (see dataProvider.ts) — special-casing one relationship
  * inside the shared provider felt like the wrong place for it.
- * `useList` + `<ListContextProvider>` is react-admin's own documented
- * pattern for getting `<Datagrid>` rendering (same column/field components
- * as CascadeList/UserList elsewhere in this codebase) over data that arrived
- * via a one-off fetch instead of the standard resource data flow.
- *
- * Scope: a single page of up to `HISTORY_PAGE_SIZE` most-recent-first
- * results, no page-through-more-than-100 control — "a simple <Datagrid>/list
- * ... is enough" per this slice's brief. If a cascade's history commonly
- * exceeds that, add real server-side pagination (the endpoint already
- * accepts `page`/`page_size`) — see README.md TODO.
+ * `<ListContextProvider>` gets `<Datagrid>`/`<Pagination>` rendering (same
+ * column/field components as CascadeList/UserList elsewhere in this
+ * codebase) over data that arrived via a one-off fetch instead of the
+ * standard resource data flow. The context value is built by hand
+ * (`buildListContext` below) rather than via react-admin's `useList`:
+ * `useList` only paginates an already-fully-loaded local array (its `total`
+ * is always `data.length`, see its source in `ra-core`), which can't
+ * represent "the server has 200 more rows we haven't fetched yet" — exactly
+ * the case here, since each page change re-fetches just that page from
+ * `GET /cascades/{id}/tests?page=N&page_size=25` rather than loading
+ * everything up front.
  *
  * **Verification status**: `GET /cascades/{cascade_id}/tests` is real (not
  * stubbed) on Platform's `platform/api-skeleton` branch as of this slice —
@@ -53,10 +68,66 @@ const HISTORY_PAGE_SIZE = 100;
  * Platform's source directly, not by an actual request/response round trip.
  * See README.md TODO.
  */
+/**
+ * `ListContextProvider`'s `value` prop is typed as the discriminated union
+ * `ListControllerResult` (loading / error / success — see `useListController`
+ * in `ra-core`), matching what `useListController`/`useList` return. Neither
+ * fits a hand-rolled server-paginated fetch, so this builds the same shape
+ * directly rather than pulling in either.
+ */
+function buildListContext(params: {
+  data: LinkTest[];
+  total: number;
+  page: number;
+  perPage: number;
+  setPage: (page: number) => void;
+  isPending: boolean;
+  error: Error | null;
+}): ListControllerResult<LinkTest> {
+  const { data, total, page, perPage, setPage, isPending, error } = params;
+  const base = {
+    sort: FIXED_SORT,
+    displayedFilters: {},
+    filterValues: {},
+    hideFilter: noop,
+    showFilter: noop,
+    setFilters: noop,
+    setSort: noop,
+    onSelect: noop,
+    onSelectAll: noop,
+    onToggleItem: noop,
+    onUnselectItems: noop,
+    page,
+    perPage,
+    refetch: noop,
+    resource: 'tests',
+    selectedIds: [],
+    setPage,
+    setPerPage: noop,
+    meta: undefined,
+  };
+  if (isPending) {
+    return { ...base, data: undefined, total: undefined, error: null, isPending: true };
+  }
+  if (error) {
+    return { ...base, data, total, error, isPending: false };
+  }
+  return { ...base, data, total, error: null, isPending: false };
+}
+
 export function TestHistoryList() {
   const record = useRecordContext<Cascade>();
+  const [page, setPage] = useState(1);
   const [tests, setTests] = useState<LinkTest[] | null>(null);
+  const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
+
+  // A different cascade means a different history entirely - start from
+  // page 1 rather than showing whatever page happened to be open before,
+  // which the new cascade may not even have.
+  useEffect(() => {
+    setPage(1);
+  }, [record?.id]);
 
   useEffect(() => {
     if (!record) return undefined;
@@ -64,11 +135,12 @@ export function TestHistoryList() {
     setTests(null);
     setError(null);
     authorizedFetchJson<{ items?: LinkTest[]; total?: number }>(
-      `/cascades/${record.id}/tests?page=1&page_size=${HISTORY_PAGE_SIZE}`,
+      `/cascades/${record.id}/tests?page=${page}&page_size=${PAGE_SIZE}`,
     )
       .then(({ body }) => {
         if (cancelled) return;
         setTests(body.items ?? []);
+        setTotal(body.total ?? 0);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -77,22 +149,26 @@ export function TestHistoryList() {
     return () => {
       cancelled = true;
     };
-    // Deliberately keyed on record?.id, not the whole `record` object:
-    // react-admin's Show controller can hand back a new record object
+    // Deliberately keyed on record?.id (not the whole `record` object) and
+    // page: react-admin's Show controller can hand back a new record object
     // reference on re-renders that don't change which cascade is being
-    // shown, and re-fetching the whole history list on every such re-render
-    // would be wasteful/flickery. Re-fetch only when we're actually looking
-    // at a different cascade.
+    // shown, and re-fetching on every such re-render would be
+    // wasteful/flickery. Re-fetch only when we're looking at a different
+    // cascade or a different page of its history.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [record?.id]);
-
-  const listContext = useList<LinkTest>({
-    data: tests ?? [],
-    isLoading: tests === null && !error,
-    perPage: HISTORY_PAGE_SIZE,
-  });
+  }, [record?.id, page]);
 
   if (!record) return null;
+
+  const listContext = buildListContext({
+    data: tests ?? [],
+    total,
+    page,
+    perPage: PAGE_SIZE,
+    setPage,
+    isPending: tests === null && !error,
+    error: error ? new Error(error) : null,
+  });
 
   return (
     <Box component="section" sx={{ mt: 3 }}>
@@ -104,12 +180,12 @@ export function TestHistoryList() {
           {error}
         </Alert>
       )}
-      {!error && tests !== null && tests.length === 0 && (
+      {!error && tests !== null && total === 0 && (
         <Typography variant="body2" color="text.secondary">
           No test requests recorded yet for this cascade.
         </Typography>
       )}
-      {!error && tests !== null && tests.length > 0 && (
+      {!error && tests !== null && total > 0 && (
         <ListContextProvider value={listContext}>
           {/* `resource="tests"` is required here (not registered as a
               `<Resource>` in App.tsx — this is a nested view, not a
@@ -123,6 +199,11 @@ export function TestHistoryList() {
             <TextField source="initiated_by" label="Initiated by" emptyText="—" />
             <FunctionField<LinkTest> label="Result" render={(test) => describeTestOutcome(test)} />
           </Datagrid>
+          {/* Single-valued rowsPerPageOptions: page size is fixed to what
+              GET /cascades/{id}/tests is fetched with (setPerPage above is a
+              no-op), so MUI hides the rows-per-page selector rather than
+              offering a control that silently does nothing. */}
+          <Pagination rowsPerPageOptions={[PAGE_SIZE]} />
         </ListContextProvider>
       )}
     </Box>
