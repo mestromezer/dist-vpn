@@ -1,6 +1,7 @@
 ---
 galaxy_info:
   role_name: agent_install
+  author: mestromezer
   description: >-
     Установка и запуск Agent'а как Docker-контейнера на уже подготовленной
     (base_hardening + docker_install) VDS: control-plane gRPC-клиент к

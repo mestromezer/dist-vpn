@@ -565,6 +565,53 @@ volume под путь персиста Agent'а, как только код Age
 запуском ни разу.** Это не должно применяться к реальной ноде без прогона
 на настоящей control-машине (с Docker daemon) сначала.
 
+### ⚠️ Обновление: `yamllint`/`ansible-lint` реально прогнаны впервые (GitHub Actions CI)
+
+Написанное выше про «`ansible-lint` не запускается в этой sandbox» по-прежнему
+верно **для Windows-песочницы разработки** — но `provisioning-lint` в
+`.github/workflows/ci.yml` гоняет оба линтера на настоящем `ubuntu-latest`, и
+это первый раз за всё время существования проекта, когда они реально
+выполнились против этого кода (`.ansible-lint`/`.yamllint` были написаны
+заранее, "на бумаге", без возможности проверить). Найдено и исправлено:
+
+- **`yamllint .` линтил и `provisioning/collections/`** — каталог, куда
+  `ansible-galaxy collection install -r requirements.yml` (по
+  `ansible.cfg`'s `collections_path`) кладёт сторонние коллекции
+  (`ansible.posix` и т.д.). Уже в `.gitignore`, но раньше никто не гонял
+  `yamllint .` целиком, чтобы это заметить. `.yamllint` теперь переиспользует
+  `.gitignore` (`ignore-from-file: [.gitignore]`) — исключения остаются в
+  одном месте, не дублируются.
+- 7 настоящих находок `yamllint` (`comments: too few spaces before comment`,
+  дефолтное правило требует 2 пробела перед инлайн `#`) — поправлены в
+  `roles/agent_install/defaults/main.yml`, `roles/agent_install/tasks/run.yml`,
+  `roles/base_hardening/defaults/main.yml`, `roles/base_hardening/handlers/main.yml`.
+- `.yamllint` дополнен пятью значениями, которые требует собственный
+  yaml-профиль `ansible-lint` (`comments.min-spaces-from-content`,
+  `comments-indentation`, `braces.max-spaces-inside`,
+  `octal-values.forbid-implicit-octal`/`forbid-explicit-octal`) — без них
+  `ansible-lint` предупреждал о "incompatible custom yamllint configuration"
+  и отключал fix-mode.
+- `schema[meta]`: во все три `meta/main.yml` (`agent_install`, `base_hardening`,
+  `docker_install`) добавлено обязательное поле `galaxy_info.author`.
+- `name[casing]`/`name[template]`: 2 имени задач с маленькой буквы
+  (`base_hardening/tasks/main.yml`) и 3 с Jinja-подстановкой в середине
+  строки (а не в конце, как требует `ansible-lint`) переформулированы —
+  смысл не менялся, только порядок слов.
+- **`var-naming[no-role-prefix]` (54 находки) — сознательно оставлено
+  невыполненным**, через `skip_list` в `.ansible-lint`, а не переименованием
+  всех переменных ролей. Причина зафиксирована прямо в файле: конвенция
+  существует, чтобы переменные разных ролей не конфликтовали при композиции
+  с чужими/сторонними ролями — у нас все три роли свои (`dependencies: []`
+  везде), коллизия физически невозможна. Проверено по официальной
+  документации ansible-lint: `var-naming` — правило уровня `basic` (входит
+  и в `moderate`/`safety`/`shared`/`production`), так что понижение профиля
+  не помогло бы избежать именно этого правила, зато выкинуло бы реальные
+  security-проверки уровня `safety` (`risky-file-permissions`,
+  `risky-shell-pipe` и т.д.) — `skip_list` конкретного правила остаётся
+  единственным точечным решением, и это официально задокументированный,
+  предусмотренный механизм (`docs.ansible.com/projects/lint/configuring`),
+  не обход.
+
 ## Scope of this slice / TODO
 
 Прошлый слайс закрывал «Базовую подготовку»

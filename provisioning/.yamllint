@@ -15,3 +15,16 @@ rules:
   # но некоторые роли по традиции пишут булевы значения как yes/no в vars.
   truthy:
     allowed-values: ["true", "false", "yes", "no"]
+  # ansible-lint запускает свой собственный yaml-профиль поверх этого файла
+  # и требует ровно эти пять значений (иначе не даёт использовать fix-mode
+  # и предупреждает "incompatible custom yamllint configuration") — см.
+  # https://docs.ansible.com/projects/lint/rules/yaml/. Ничего из этого не
+  # конфликтует с остальными правилами выше.
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  braces:
+    max-spaces-inside: 1
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
