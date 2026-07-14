@@ -48,8 +48,19 @@ jobs:
       # That means this job is slower and depends on ghcr.io being reachable;
       # tests that genuinely can't reach Docker skip themselves gracefully
       # (see tests/test_xray_client.py / test_docker_manager.py).
+      #
+      # AGENT_TEST_SKIP_CONTAINER_EGRESS_TESTS: confirmed empirically (first
+      # real CI run) that spawned containers on this runner get no outbound
+      # network path at all - not flaky, not "no internet to example.com
+      # specifically", genuinely no route (even a deliberately non-routable
+      # "black hole" target fails immediately instead of timing out). See
+      # tests/conftest.py::container_egress for exactly which tests this
+      # skips and why - unset for local development, where they still run
+      # for real.
       - name: Run tests
         working-directory: agent
+        env:
+          AGENT_TEST_SKIP_CONTAINER_EGRESS_TESTS: "1"
         run: pytest -q
 
   admin-client-tests:
