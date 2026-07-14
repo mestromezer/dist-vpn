@@ -1,6 +1,6 @@
 # dist-vpn
 
-Распределённая система управления флотом нод (Agent/Platform/Admin Client) для каскадного обхода блокировок Россия→зарубеж. Архитектура и все технические задания — в [`docs/`](docs/).
+Распределённая система управления флотом серверных нод (Agent/Platform/Admin Client) для построения многоузловых прокси-каскадов с устойчивым доступом в условиях активной сетевой фильтрации. Архитектура и все технические задания — в [`docs/`](docs/).
 
 ## Структура репозитория
 
@@ -19,7 +19,7 @@
 
 ## Документы (`docs/`)
 
-1. [TZ-1-rossiyskiy-vds.md](docs/TZ-1-rossiyskiy-vds.md) — критерии выбора РФ-VDS.
+1. [TZ-1-vds-selection.md](docs/TZ-1-vds-selection.md) — критерии выбора VDS для входной ноды.
 2. [TZ-3-arhitektura-flota.md](docs/TZ-3-arhitektura-flota.md) — высокоуровневая архитектура (начинать чтение отсюда).
 3. [TZ-4-agent.md](docs/TZ-4-agent.md), [TZ-5-platform.md](docs/TZ-5-platform.md), [TZ-6-admin-client.md](docs/TZ-6-admin-client.md), [TZ-7-vds-provisioning.md](docs/TZ-7-vds-provisioning.md) — детальные ТЗ по каждой программе.
 
