@@ -14,8 +14,10 @@ from dist_vpn_platform.models.link_test import LinkTest
 from dist_vpn_platform.models.node import Node
 from dist_vpn_platform.models.refresh_token import RefreshToken
 from dist_vpn_platform.models.rotation_record import RotationRecord
+from dist_vpn_platform.models.node_resource_sample import NodeResourceSample
 from dist_vpn_platform.models.usage_stat import UsageStat
 from dist_vpn_platform.models.user import User, UserCascade
+from dist_vpn_platform.models.user_device_kick_event import UserDeviceKickEvent
 
 __all__ = [
     "Base",
@@ -31,4 +33,6 @@ __all__ = [
     "AdminAccount",
     "EnrollmentToken",
     "RefreshToken",
+    "UserDeviceKickEvent",
+    "NodeResourceSample",
 ]

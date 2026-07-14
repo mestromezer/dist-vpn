@@ -6,7 +6,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from dist_vpn_platform.models.base import Base, new_uuid, sa_enum, utcnow
@@ -54,6 +54,16 @@ class Node(Base):
     cpu_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     mem_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     disk_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Cached from the most recent TelemetryReport.user_online this node sent
+    # (grpc_server/servicer.py::_handle_user_online) - read when writing a
+    # NodeResourceSample row on the next Heartbeat, since Heartbeat and
+    # TelemetryReport are separate messages with no guaranteed arrival order/timing
+    # relative to each other (see NodeResourceSample's own module docstring and
+    # _handle_heartbeat for how this is used). Not authoritative for anything else -
+    # purely a resource-vs-load correlation aid.
+    last_online_user_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_online_device_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # mTLS identity (TZ-5 §6.2). Real step-ca issuance is out of scope for this slice -
     # see platform/README.md TODO section; column exists so the schema doesn't need to
