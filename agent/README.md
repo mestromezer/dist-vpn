@@ -152,6 +152,7 @@ bash scripts/gen_proto.sh
 | `AGENT_XRAY_DOCKER_IMAGE` | `ghcr.io/xtls/xray-core:latest` | Образ (с тегом), из которого `docker_manager.py` создаёт/запускает контейнер Xray-core |
 | `AGENT_XRAY_CONTAINER_NAME` | `dist-vpn-xray-core` | Имя управляемого контейнера — `docker_manager.py` трогает **только** контейнер с этим именем (TZ-4 §5.4) |
 | `AGENT_XRAY_CONFIG_HOST_PATH` | `/etc/dist-vpn/xray-config.json` | Путь на хосте, монтируемый read-only в контейнер как `/etc/xray/config.json` |
+| `AGENT_XRAY_PUBLIC_PORT` | `443` | Публикуемый на `0.0.0.0` порт для реального клиентского/backhaul VLESS-трафика (Hop A/Hop B). **Найдено при написании пошагового деплоя на два VDS**: `AGENT_XRAY_API_ADDRESS` выше публикуется при создании контейнера, но Hop A/Hop B инбаунды добавляются позже, уже после старта контейнера, через `AddInbound` — а Docker не умеет добавить проброс порта уже работающему контейнеру. Без этой переменной реальный VLESS-трафик просто не мог физически дойти до контейнера, даже с рабочими REALITY-ключами и корректным `port`/`listen` в самом инбаунде (см. `docker_manager.py`). Должен совпадать с `HOP_LISTEN_PORT` на стороне Platform (`platform/src/dist_vpn_platform/services/xray_templates.py`) — сейчас это согласование только по конвенции, не проверяется автоматически ни одной из сторон |
 | `AGENT_LOG_LEVEL` | `INFO` | Уровень логирования |
 
 ### mTLS и bootstrap-нюанс
