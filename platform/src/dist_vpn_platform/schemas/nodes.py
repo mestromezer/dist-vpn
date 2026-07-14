@@ -19,6 +19,10 @@ class NodeOut(BaseModel):
     status: NodeStatus
     agent_version: str | None = None
     last_heartbeat_at: datetime | None = None
+    # Admin-set public dial address (models/node.py Node.public_address) - required
+    # (only) on an entry node before a working client vless:// URI can be composed,
+    # see api/routes/users.py's connection endpoint.
+    public_address: str | None = None
 
 
 class NodeListResponse(BaseModel):
@@ -39,3 +43,4 @@ class NodeEnrollResponse(BaseModel):
 class NodePatchRequest(BaseModel):
     role: NodeRole | None = None
     label: str | None = None
+    public_address: str | None = None

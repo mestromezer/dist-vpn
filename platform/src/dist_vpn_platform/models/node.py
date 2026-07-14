@@ -31,6 +31,14 @@ class Node(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Public dial address (IP or DNS name) a VPN client should connect to when this
+    # node is an entry node - deliberately separate from `hostname` above, which is
+    # self-reported by the Agent at enrollment (Enrollment.hostname, agent_control.proto)
+    # and may be an internal/private hostname, not necessarily what's reachable from the
+    # public internet. Only the operator knows the VDS's real public address, so this is
+    # admin-set via PATCH /nodes/{id} (schemas/nodes.py NodePatchRequest), never inferred.
+    # Required (only) to compose a client vless:// URI - see api/routes/users.py.
+    public_address: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[NodeRole] = mapped_column(sa_enum(NodeRole), nullable=False)
     region: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[NodeStatus] = mapped_column(

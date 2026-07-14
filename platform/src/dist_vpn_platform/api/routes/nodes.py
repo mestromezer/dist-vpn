@@ -116,6 +116,8 @@ async def patch_node(
         node.role = body.role
     if body.label is not None:
         node.label = body.label
+    if body.public_address is not None:
+        node.public_address = body.public_address
 
     await db.commit()
     await db.refresh(node)

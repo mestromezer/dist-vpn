@@ -33,6 +33,16 @@ class Cascade(Base):
     # strings, portable as JSON across Postgres and SQLite.
     hop_a_presets: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
 
+    # Hop A (client-facing) REALITY identity - generated once at cascade creation
+    # (services/reality_keys.py), embedded in the AddInbound dispatched to the entry
+    # node (services/xray_templates.py build_hopa_inbound_json). The private key never
+    # leaves this row/that dispatch - only hopa_reality_public_key/short_id are ever
+    # returned by the API (schemas/cascades.py CascadeOut), for composing a client
+    # vless:// URI (api/routes/users.py connection endpoint).
+    hopa_reality_private_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hopa_reality_public_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hopa_reality_short_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -55,5 +65,15 @@ class CascadeExitNode(Base):
         String(36), ForeignKey("cascades.id", ondelete="CASCADE"), primary_key=True
     )
     exit_node_id: Mapped[str] = mapped_column(String(36), ForeignKey("nodes.id"), primary_key=True)
+
+    # Hop B (entry->exit backhaul) REALITY identity for this specific (cascade,
+    # exit_node) pairing - generated once when the pairing is created. Belongs here
+    # rather than on Cascade/Node because build_hopb_inbound_json/build_hopb_outbound_json
+    # are already dispatched once per pairing (api/routes/cascades.py's exit-node loop),
+    # and a single physical exit node can be a candidate in more than one cascade with
+    # independent keys per pairing - simpler than reasoning about cross-cascade reuse.
+    hopb_reality_private_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hopb_reality_public_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hopb_reality_short_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     cascade: Mapped["Cascade"] = relationship(back_populates="exit_links")
