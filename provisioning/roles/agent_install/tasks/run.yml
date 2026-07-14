@@ -89,6 +89,68 @@
           (agent_mtls_client_key_dest ~ ':' ~ agent_container_client_key_path ~ ':ro')] }}
   when: agent_client_cert_provided | bool
 
+# ⚠️ АРХИТЕКТУРНЫЙ РАЗРЫВ, НАЙДЕННЫЙ при написании пошагового деплоя на два
+# VDS (не был учтён при первом написании этой роли): agent/docker_manager.py
+# управляет соседним контейнером Xray-core через Docker Engine API
+# (`docker.from_env()`) — Agent'у ВНУТРИ его собственного контейнера нужен
+# доступ к Docker. Более ранний слайс (см. docker_manager.py, докстринг
+# модуля) явно решил НЕ контейнеризовать Agent именно затем, чтобы не
+# монтировать хостовый Docker-сокет в контейнер ("the specific risk TZ-4
+# §5.4 calls out") — но эта роль его как раз контейнеризует. Прямой
+# bind-mount `/var/run/docker.sock` решил бы задачу, но давал бы
+# скомпрометированному Agent-контейнеру root-эквивалентный доступ ко ВСЕМУ
+# хосту, а не только к управлению одним контейнером Xray — рассмотрено и
+# отклонено; правильный принцип здесь "у процесса должны быть минимальные
+# права", а не "контейнер vs хост напрямую" (тот же риск был бы и без
+# контейнеризации Agent'а, если сам процесс имеет прямой доступ к сокету).
+#
+# Решение: docker-socket-proxy (Tecnativa, HAProxy-based, активно
+# поддерживаемый, стандартный паттерн для "дать контейнеру ограниченный
+# Docker API без полного сокета" — github.com/Tecnativa/docker-socket-proxy)
+# как сайдкар. Реальный `/var/run/docker.sock` смонтирован ТОЛЬКО в прокси
+# (read-only), не в Agent. Прокси разрешает только CONTAINERS+IMAGES+POST
+# (создание/старт/инспект контейнеров и pull образов) — ни EXEC, ни VOLUMES,
+# ни NETWORKS, ни SWARM, ни SECRETS, ни остальные категории API не разрешены
+# (Tecnativa deny-by-default: всё, что не выставлено в "1", запрещено).
+# Agent обращается к прокси по имени контейнера через приватную Docker-сеть,
+# без публикации портов на хост. docker-py's `docker.from_env()`
+# (docker_manager.py) нативно читает переменную окружения `DOCKER_HOST` —
+# изменений в коде Agent'а не потребовалось, только эта роль.
+# Честная оговорка: прокси разрешает CONTAINERS не только для конкретного
+# xray_container_name, а для ЛЮБОГО контейнера на хосте (Tecnativa не умеет
+# ACL по имени контейнера "из коробки") — то есть компрометированный Agent
+# всё ещё может создать/запустить/остановить произвольный контейнер (не
+# затронув volumes/networks/secrets/exec других контейнеров), а не только
+# управляемый им Xray. Существенно у́же прямого доступа к сокету, но не
+# идеальная изоляция «только этот контейнер» — задокументировано, не скрыто.
+- name: Создать приватную Docker-сеть для Agent↔docker-socket-proxy
+  community.docker.docker_network:
+    name: "{{ agent_docker_proxy_network }}"
+    internal: true # ни один из двух контейнеров в этой сети не получает выход в интернет через неё
+
+- name: Запустить docker-socket-proxy (единственный держатель реального docker.sock)
+  community.docker.docker_container:
+    name: "{{ agent_docker_proxy_container_name }}"
+    image: "{{ agent_docker_proxy_image }}"
+    state: started
+    restart_policy: "{{ agent_restart_policy }}"
+    networks:
+      - name: "{{ agent_docker_proxy_network }}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    env:
+      CONTAINERS: "1"
+      IMAGES: "1"
+      POST: "1"
+      # Всё остальное (EXEC, VOLUMES, NETWORKS, SWARM, SECRETS, SERVICES,
+      # NODES, PLUGINS, SYSTEM, AUTH, BUILD, COMMIT, CONFIGS, DISTRIBUTION,
+      # EVENTS, INFO, TASKS...) намеренно не выставлено — deny-by-default.
+
+- name: Собрать список Docker-сетей для контейнера Agent'а
+  ansible.builtin.set_fact:
+    agent_container_networks:
+      - name: "{{ agent_docker_proxy_network }}"
+
 # env передаётся через Docker Engine API (community.docker.docker_container
 # использует docker-py, не шеллит `docker run -e ...`), так что токен/адрес
 # никогда не попадают в аргументы процесса на хосте (`ps aux` их не
@@ -108,6 +170,7 @@
     state: started
     restart_policy: "{{ agent_restart_policy }}"
     volumes: "{{ agent_container_volumes | default([]) }}"
+    networks: "{{ agent_container_networks | default([]) }}"
     env:
       AGENT_PLATFORM_ADDRESS: "{{ agent_platform_address }}"
       AGENT_ENROLLMENT_TOKEN: "{{ agent_enrollment_token }}"
@@ -119,4 +182,7 @@
       AGENT_MTLS_CA_CERT_PATH: "{{ agent_container_ca_path if not agent_insecure_dev_mode else '' }}"
       AGENT_MTLS_CLIENT_CERT_PATH: "{{ agent_container_client_cert_path if agent_client_cert_provided else '' }}"
       AGENT_MTLS_CLIENT_KEY_PATH: "{{ agent_container_client_key_path if agent_client_cert_provided else '' }}"
+      # docker-py's docker.from_env() (docker_manager.py) reads this natively - no
+      # Agent code change needed. Points at the scoped proxy, never the real socket.
+      DOCKER_HOST: "tcp://{{ agent_docker_proxy_container_name }}:2375"
   no_log: true

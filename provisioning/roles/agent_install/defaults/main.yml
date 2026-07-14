@@ -36,6 +36,19 @@ agent_registry_image: ""
 agent_container_name: dist-vpn-agent
 agent_restart_policy: unless-stopped
 
+# --- docker-socket-proxy (см. tasks/run.yml за полным обоснованием) ---
+# Agent-контейнер НЕ получает прямой доступ к /var/run/docker.sock (это был
+# бы root-эквивалентный доступ ко всему хосту) — вместо этого реальный сокет
+# смонтирован только в этот sidecar-прокси (Tecnativa docker-socket-proxy),
+# разрешающий лишь CONTAINERS+IMAGES+POST. Образ без закреплённой версии
+# (`:latest`) — тот же самый, не устранённый в этом слайсе компромисс, что и
+# у agent_image_tag/agent_registry_image ниже (нет собственного пайплайна,
+# публикующего закреплённый тег) — оператор должен закрепить версию сам
+# перед production-раскаткой, см. README.
+agent_docker_proxy_image: tecnativa/docker-socket-proxy:latest
+agent_docker_proxy_container_name: dist-vpn-docker-proxy
+agent_docker_proxy_network: dist-vpn-docker-proxy-net
+
 # --- Конфигурация Agent (env vars) --- см. agent/README.md, раздел
 # "Конфигурация (переменные окружения)", префикс AGENT_ (pydantic-settings).
 # agent_platform_address / agent_enrollment_token НЕ определяются здесь со
