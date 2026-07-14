@@ -27,3 +27,11 @@ class UserListResponse(BaseModel):
     # Additive field - see the identical note on CascadeListResponse.total
     # (schemas/cascades.py) for why this isn't literally in openapi.yaml yet.
     total: int
+
+
+class UserConnectionOut(BaseModel):
+    """See api/routes/users.py GET /users/{user_id}/connection/{cascade_id} - not in
+    contracts/rest/openapi.yaml (additive, same posture as /auth/change-password, see
+    platform/README.md "Отклонения от ТЗ")."""
+
+    vless_uri: str

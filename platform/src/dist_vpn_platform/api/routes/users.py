@@ -31,8 +31,14 @@ from dist_vpn_platform.generated import agent_control_pb2 as pb
 from dist_vpn_platform.grpc_server.servicer import new_command_id
 from dist_vpn_platform.models.admin_account import AdminAccount
 from dist_vpn_platform.models.cascade import Cascade
+from dist_vpn_platform.models.node import Node
 from dist_vpn_platform.models.user import User, UserCascade
-from dist_vpn_platform.schemas.users import UserCreateRequest, UserListResponse, UserOut
+from dist_vpn_platform.schemas.users import (
+    UserConnectionOut,
+    UserCreateRequest,
+    UserListResponse,
+    UserOut,
+)
 from dist_vpn_platform.services import xray_templates as xray
 
 logger = logging.getLogger(__name__)
@@ -186,3 +192,47 @@ async def revoke_user(
     await db.commit()
 
     audit_logger.info("user_revoked", extra={"admin_id": admin.id, "user_id": user_id})
+
+
+@router.get("/{user_id}/connection/{cascade_id}", response_model=UserConnectionOut)
+async def get_user_connection(
+    user_id: str,
+    cascade_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: AdminAccount = Depends(require_admin),
+) -> UserConnectionOut:
+    """Composes the ready-to-import `vless://` URI for this user on this cascade
+    (services/xray_templates.py build_vless_uri) - not in contracts/rest/openapi.yaml,
+    see schemas/users.py UserConnectionOut docstring. Requires the cascade's entry node
+    to have Node.public_address set (PATCH /nodes/{id}) - there is no reliable way to
+    infer a client-dialable address otherwise (see models/node.py's public_address
+    docstring), so this 400s with a specific, actionable message rather than guessing."""
+    stmt = select(User).options(selectinload(User.cascade_links)).where(User.id == user_id)
+    user = (await db.execute(stmt)).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if user.revoked_at is not None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "User is revoked")
+    if cascade_id not in user.cascade_ids:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User is not granted access to this cascade")
+
+    cascade = await db.get(Cascade, cascade_id)
+    if cascade is None or cascade.hopa_reality_public_key is None or cascade.hopa_reality_short_id is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Cascade not found or missing REALITY key material")
+
+    entry_node = await db.get(Node, cascade.entry_node_id)
+    if entry_node is None or not entry_node.public_address:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Entry node {cascade.entry_node_id} has no public_address set - "
+            f"PATCH /nodes/{cascade.entry_node_id} with {{'public_address': '<ip-or-hostname>'}} first",
+        )
+
+    vless_uri = xray.build_vless_uri(
+        user_uuid=user.uuid,
+        entry_public_address=entry_node.public_address,
+        hopa_reality_public_key=cascade.hopa_reality_public_key,
+        hopa_reality_short_id=cascade.hopa_reality_short_id,
+        label=f"{user.name}-{cascade.id[:8]}",
+    )
+    return UserConnectionOut(vless_uri=vless_uri)
