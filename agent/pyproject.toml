@@ -1,0 +1,45 @@
+[project]
+name = "dist-vpn-agent"
+version = "0.1.0"
+description = "Agent component of dist-vpn: control-plane gRPC client (dial-out) to Platform, local Xray/Docker management (follow-up slice)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+  "grpcio>=1.66",
+  "grpcio-tools>=1.66",
+  "docker>=7.1",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.4",
+  "python-json-logger>=2.0",
+  # identity.py: local EC/P-256 keypair + PKCS#10 CSR generation for mTLS
+  # bootstrap enrollment (see agent/README.md).
+  "cryptography>=42.0",
+  # connectivity_test.py: HTTP probe through the ephemeral test client's
+  # SOCKS5 proxy (RunTest, TZ-4 SS3.4). PySocks is requests' SOCKS proxy
+  # backend (imported as `sockshandler`/`socks`, activated via requests[socks]
+  # -- pinned explicitly here rather than relying on the extras alias so it's
+  # visible in this list without cross-referencing requests' setup.py).
+  "requests>=2.32",
+  "PySocks>=1.7",
+  "pytest>=8.2",
+  "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+dist-vpn-agent = "dist_vpn_agent.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dist_vpn_agent*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+dist_vpn_agent = ["py.typed"]
