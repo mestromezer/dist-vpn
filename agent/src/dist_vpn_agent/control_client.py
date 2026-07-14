@@ -36,6 +36,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 import grpc
+import psutil
 
 from dist_vpn_agent import identity
 from dist_vpn_agent.config import AgentSettings, NodeRole, mask_secret
@@ -251,6 +252,29 @@ class ControlClient:
             )
         )
 
+    def _sample_host_resources(self) -> tuple[float, float, float]:
+        """Real cpu/mem/disk percentages via psutil - was a hardcoded (0.0, 0.0, 0.0)
+        placeholder until this slice (see agent/README.md "Scope of this slice",
+        closed while wiring resource-vs-user-count monitoring on the Platform side,
+        which needs real numbers here to mean anything).
+
+        ``cpu_percent(interval=None)`` is Xray-core's own non-blocking convention
+        (instantaneous rate since the *previous* call, not a fresh blocking sample) -
+        the first call in a process's lifetime always returns 0.0, which is expected
+        and self-corrects from the second heartbeat onward, not a bug.
+
+        ``disk_usage("/")`` reports the Agent process's own filesystem view - inside
+        the Agent's container this is the container's root (mostly the image layers
+        plus whatever's bind-mounted at "/"), which approximates but is not
+        identical to the *host* VDS's true disk pressure across all containers.
+        A known, documented simplification, not a precise host-wide metric.
+        """
+        return (
+            psutil.cpu_percent(interval=None),
+            psutil.virtual_memory().percent,
+            psutil.disk_usage("/").percent,
+        )
+
     async def _build_heartbeat_message(self) -> pb2.AgentMessage:
         # docker_manager.health() talks to the (blocking, synchronous)
         # docker-py client -- run it off the event loop thread so a slow or
@@ -258,18 +282,61 @@ class ControlClient:
         health = await asyncio.to_thread(self._docker_manager.health)
         if health.status == "docker_unavailable":
             logger.warning("heartbeat: Docker Engine API unreachable: %s", health.detail)
-        # cpu_percent/mem_percent/disk_percent remain placeholders -- see
-        # agent/README.md "Scope of this slice" (host resource sampling,
-        # e.g. via psutil, is a separate, not-yet-made dependency decision).
+        cpu_percent, mem_percent, disk_percent = await asyncio.to_thread(self._sample_host_resources)
         return pb2.AgentMessage(
             heartbeat=pb2.Heartbeat(
                 node_id=self.node_id or "",
                 health=pb2.NodeHealth(
                     xray_container_running=health.running,
-                    cpu_percent=0.0,
-                    mem_percent=0.0,
-                    disk_percent=0.0,
+                    cpu_percent=cpu_percent,
+                    mem_percent=mem_percent,
+                    disk_percent=disk_percent,
                 ),
+                timestamp_unix=int(time.time()),
+            )
+        )
+
+    async def _build_telemetry_message(self) -> pb2.AgentMessage | None:
+        """Real per-user traffic + online-device telemetry via
+        ``xray_client.get_users_stats()`` (StatsService) - previously nothing built
+        or sent a ``TelemetryReport`` at all (the message type existed in the
+        contract and Platform's ingestion side was tested against synthetic data,
+        but no real Agent code path ever populated one). Returns ``None`` (skip
+        this cycle, don't crash the heartbeat loop) if the local Xray-core API is
+        unreachable - the same "a stat we can't read isn't worth losing the whole
+        control-plane session over" reasoning as ``_build_heartbeat_message``'s
+        Docker-health handling above, just without a health-status field to report
+        the failure through (TelemetryReport has no room for a partial-failure
+        signal in the contract - logged instead)."""
+        try:
+            user_stats = await self._xray_client.get_users_stats()
+        except XrayClientError as err:
+            logger.warning("telemetry: local Xray-core StatsService unreachable: %s", err)
+            return None
+
+        counters = [
+            pb2.UsageCounter(
+                scope="user",
+                key=stat.email,
+                uplink_bytes=stat.uplink_bytes,
+                downlink_bytes=stat.downlink_bytes,
+            )
+            for stat in user_stats
+            if stat.uplink_bytes or stat.downlink_bytes
+        ]
+        user_online = [
+            pb2.UserOnlineStat(email=stat.email, online_ips=stat.online_ips)
+            for stat in user_stats
+            if stat.online_ips
+        ]
+        if not counters and not user_online:
+            return None
+
+        return pb2.AgentMessage(
+            telemetry=pb2.TelemetryReport(
+                node_id=self.node_id or "",
+                counters=counters,
+                user_online=user_online,
                 timestamp_unix=int(time.time()),
             )
         )
@@ -495,6 +562,11 @@ class ControlClient:
             await asyncio.sleep(self._settings.heartbeat_interval_seconds)
             await outbound.put(await self._build_heartbeat_message())
             logger.debug("sent heartbeat node_id=%s", self.node_id)
+
+            telemetry_message = await self._build_telemetry_message()
+            if telemetry_message is not None:
+                await outbound.put(telemetry_message)
+                logger.debug("sent telemetry node_id=%s", self.node_id)
 
     # -- public API ----------------------------------------------------------
 

@@ -22,6 +22,10 @@ dependencies = [
   # visible in this list without cross-referencing requests' setup.py).
   "requests>=2.32",
   "PySocks>=1.7",
+  # control_client.py: real host cpu/mem/disk sampling for Heartbeat.NodeHealth -
+  # cpu_percent/mem_percent/disk_percent were hardcoded 0.0 placeholders until
+  # this slice (see agent/README.md "Scope of this slice" note this closes).
+  "psutil>=6.0",
   "pytest>=8.2",
   "pytest-asyncio>=0.23",
 ]
