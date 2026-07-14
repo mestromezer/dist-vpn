@@ -28,19 +28,30 @@ import { getAccessToken } from '../auth/tokenStore';
  * What Platform's `/events` actually does, per `services/event_bus.py`'s own
  * doc comment: every connected subscriber receives, as JSON, every
  * `HealthEvent` row created (node heartbeat transitions, node decommission,
- * cascade creation) and every `LinkTest` that resolves. The envelope is
- * `{"type": "health_event"|"link_test", "data": {...}}` — **snake_case type
- * tags**, not the `"HealthEvent"`/`"LinkTest"` PascalCase this client
- * originally guessed from the contract's prose ("JSON wrapping one of:
- * HealthEvent, Cascade, LinkTest" — the contract never actually pins down
- * the tag's casing). `parseRealtimeMessage`/`fromTaggedShape` below now
- * accept both spellings so this keeps working regardless of which the
- * contract eventually formalizes. There is, as of this slice, no `"cascade"`
- * / `"Cascade"` message at all — `event_bus.py` explicitly flags pushing
- * `Cascade.status` directly as "not wired up yet" on Platform's side; a
- * cascade's status change is currently only observable over the socket as a
- * `health_event` whose `cascade_id` is set and `node_id` is absent (see
- * `topology/liveTopology.ts`, which now handles that shape explicitly).
+ * cascade creation), every full `Cascade` snapshot published on creation/DOWN
+ * (heartbeat-timeout auto-detect)/recovery, and every `LinkTest` that
+ * resolves. The envelope is `{"type": "health_event"|"cascade"|"link_test",
+ * "data": {...}}` — **snake_case type tags**, not the
+ * `"HealthEvent"`/`"Cascade"`/`"LinkTest"` PascalCase this client originally
+ * guessed from the contract's prose ("JSON wrapping one of: HealthEvent,
+ * Cascade, LinkTest" — the contract never actually pins down the tag's
+ * casing). `parseRealtimeMessage`/`fromTaggedShape` below accept both
+ * spellings so this keeps working regardless of which the contract
+ * eventually formalizes.
+ *
+ * **Correction (backlog round, this slice)**: an earlier version of this
+ * comment claimed there was no `"cascade"`/`"Cascade"` message at all, with
+ * a cascade's status change only observable as a `health_event` whose
+ * `cascade_id` is set. Platform's `event_bus.py::publish_cascade_event` now
+ * exists and is called from cascade creation, `health_scheduler.py`'s
+ * timeout sweep, and the heartbeat handler's cascade-recovery path (see the
+ * sibling `platform/api-skeleton` worktree) — confirmed by reading that
+ * source directly. `topology/liveTopology.ts`'s `Cascade` case, which was
+ * already built defensively to handle this shape before Platform ever sent
+ * it, is now the primary path a cascade's status/topology updates live; the
+ * `health_event`-with-`cascade_id` path there still exists too (redundant
+ * with, not superseded by, the `Cascade` broadcast — both fire for the same
+ * transition).
  *
  * `parseRealtimeMessage`:
  *   1. Tries a discriminated envelope `{ type, data: {...} }` first, where
@@ -136,11 +147,11 @@ export interface EventsSocketOptions {
    * A connection must stay open this long (or deliver at least one message,
    * whichever comes first) before it's treated as "stable" and resets the
    * backoff/failure counter. Without this, a socket that opens and then
-   * closes right away — which is *exactly* what Platform's `/events` is
-   * documented to currently do ("closes immediately with 'not
-   * implemented'") — would look like a fresh success on every single
-   * attempt, backoff would never grow, and `unavailable` (and therefore the
-   * polling fallback) would never trigger. This is the subtle failure mode
+   * closes right away — the kind of flap a brief network blip or a Platform
+   * restart could still cause — would look like a fresh success on every
+   * single attempt, backoff would never grow, and `unavailable` (and
+   * therefore the polling fallback) would never trigger. This is the subtle
+   * failure mode
    * the task called out explicitly; eventsSocket.test.ts asserts it.
    */
   stableAfterMs?: number;
@@ -292,14 +303,11 @@ interface TaggedEnvelope {
 /**
  * Recognized tags for each message kind. Platform's actual implementation
  * (sibling `platform/api-skeleton` worktree, `services/event_bus.py`) sends
- * lowercase snake_case (`health_event`, `link_test`); the PascalCase forms
- * are the contract prose's own naming for the three schemas
+ * lowercase snake_case (`health_event`, `cascade`, `link_test`); the
+ * PascalCase forms are the contract prose's own naming for the three schemas
  * (`HealthEvent`/`Cascade`/`LinkTest`) and are kept too in case a future
  * Platform revision — or the eventual formal AsyncAPI spec the contract's
- * bottom-of-file comment promises — picks that spelling instead. There is
- * no Platform-side `cascade`/`Cascade` sender yet (see file-level doc
- * comment above) but the tag is still recognized here so this client picks
- * it up for free once Platform adds it.
+ * bottom-of-file comment promises — picks that spelling instead.
  */
 const HEALTH_EVENT_TAGS = new Set(['HealthEvent', 'health_event']);
 const CASCADE_TAGS = new Set(['Cascade', 'cascade']);

@@ -36,10 +36,16 @@ export async function fetchTopologySnapshot(): Promise<TopologySnapshot> {
  *
  * - `Cascade`: upsert by id (replace the matching cascade, or append if this
  *   is a cascade the last REST snapshot didn't have yet — e.g. created by
- *   another admin session after this one loaded). Not currently sent by
- *   Platform (see eventsSocket.ts's file-level doc comment — `event_bus.py`
- *   explicitly flags this as not wired up yet), but handled here so it's
- *   picked up automatically once Platform adds it.
+ *   another admin session after this one loaded). Platform sends this via
+ *   `event_bus.py::publish_cascade_event`, called from cascade creation,
+ *   `health_scheduler.py`'s heartbeat-timeout sweep, and the heartbeat
+ *   handler's cascade-recovery path (see the sibling `platform/api-skeleton`
+ *   worktree) — this was built defensively ahead of Platform actually
+ *   sending it, and is now exercised for real: it's the path that closes the
+ *   "brand-new cascade doesn't appear live" gap the `HealthEvent` branch
+ *   below can't (a `HealthEvent` alone carries no entry/exit node ids, so a
+ *   cascade this session's initial snapshot predates can't be reconstructed
+ *   from one).
  * - `HealthEvent`: a node *or* cascade status transition — Platform reuses
  *   the same `HealthEvent` row/broadcast for both (see
  *   `platform/src/dist_vpn_platform/api/routes/{nodes,cascades}.py`'s
@@ -50,21 +56,18 @@ export async function fetchTopologySnapshot(): Promise<TopologySnapshot> {
  *   leaves `node_id` null. This function branches on which id is present:
  *     - `node_id` set -> patches the matching Node's `status`.
  *     - `node_id` absent, `cascade_id` set -> patches the matching Cascade's
- *       `status`. This is the *only* way a cascade's status currently
- *       updates live (Platform has no dedicated `Cascade` broadcast yet, see
- *       above) — this is how TZ-6 §3.1's "where the connection breaks"
- *       indicator actually stays live today, not via the `Cascade` case.
+ *       `status`. Redundant with the `Cascade` broadcast for an
+ *       already-known cascade (both fire for the same transition, see
+ *       `event_bus.py` call sites above) — kept as its own branch rather
+ *       than removed because it's a strict subset of what `Cascade` handles
+ *       (status-only, no upsert-by-append) and costs nothing to keep.
  *   Cast note: `to_status` is typed as a bare `string` in contract/types.ts
  *   for both Node/Cascade statuses (the contract doesn't constrain it to
  *   either enum), so this trusts the server to send one of the known values
  *   for whichever kind of transition it is.
- *   No matching node/cascade (e.g. a brand-new cascade this session's
- *   initial snapshot predates, which can't be reconstructed from a
- *   `HealthEvent` alone — it carries no entry/exit node ids) -> message is a
- *   no-op. Known limitation, not a silent bug: a cascade created by another
- *   admin session while this one's WS is open won't appear until either
- *   Platform adds a real `Cascade` broadcast or the socket drops and polling
- *   resumes. See README.md TODO.
+ *   No matching node -> message is a no-op (a `HealthEvent` alone can't
+ *   reconstruct a brand-new Node either, but nothing currently broadcasts a
+ *   `Node` snapshot the way `Cascade` does — out of scope for this slice).
  * - `LinkTest`: not part of the topology graph (no node/cascade field this
  *   view renders changes as a result of a test outcome) — ignored here.
  *   TestRequestButton.tsx is where LinkTest pushes matter.
