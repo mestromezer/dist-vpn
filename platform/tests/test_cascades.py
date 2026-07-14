@@ -97,11 +97,20 @@ async def test_create_cascade_dispatches_commands_and_reports_up(
         assert hopa_reality["shortIds"] == [body["hopa_reality_short_id"]]
         # The private key must never leak into the public API response.
         assert hopa_reality["privateKey"] != body["hopa_reality_public_key"]
+        # "port" used to be omitted entirely - agent/xray_client.py treats it as
+        # *optional* rather than raising, so the inbound would silently end up with no
+        # port_list, i.e. nothing actually listening. A second, independent hard
+        # blocker beyond the empty REALITY keys above - see xray_templates.py's
+        # HOP_LISTEN_PORT docstring.
+        assert hopa_inbound["port"] == 443
+        assert hopa_inbound["listen"] == "0.0.0.0"
 
         hopb_outbound = json.loads(entry_agent.received_commands[1].add_outbound.outbound_json)
         hopb_outbound_reality = hopb_outbound["streamSettings"]["realitySettings"]
         hopb_inbound = json.loads(exit_agent.received_commands[0].add_inbound.inbound_json)
         hopb_inbound_reality = hopb_inbound["streamSettings"]["realitySettings"]
+        assert hopb_inbound["port"] == 443
+        assert hopb_outbound["settings"]["vnext"][0]["port"] == 443
         assert hopb_inbound_reality["privateKey"]
         # The Hop A->B outbound (entry, REALITY client role) must reference the exit
         # node's own Hop B inbound public identity - fetch the persisted pairing row

@@ -212,6 +212,7 @@ platform/
 ### Сделано в четвёртом слайсе
 
 - ~~REALITY-ключи для Hop A/Hop B~~ — реальные X25519-keypair'ы вместо жёстко пустых `""` (был жёсткий блокер, не косметика — см. "Отклонения от ТЗ" п.11).
+- ~~`port`/`listen` в Hop A/Hop B inbound JSON~~ — второй, независимый жёсткий блокер, найденный при написании пошагового деплоя на два VDS: `agent/src/dist_vpn_agent/xray_client.py::_build_inbound_handler_config` считает `"port"` опциональным полем, а не обязательным — без него инбаунд молча остаётся без `port_list`, т.е. реально ничего не слушает. Добавлена константа `HOP_LISTEN_PORT = 443` (`xray_templates.py`), используется во всех трёх местах (Hop A inbound, Hop B outbound `vnext[].port`, Hop B inbound) и в `build_vless_uri`.
 - ~~Готовая `vless://` ссылка для клиента~~ — `GET /users/{user_id}/connection/{cascade_id}`.
 - ~~Публичный адрес entry-ноды~~ — `Node.public_address`, админ-задаваемый через `PATCH /nodes/{id}`.
 

@@ -76,6 +76,16 @@ def routing_rule_tag(cascade_id: str) -> str:
 REALITY_DEST = "www.microsoft.com:443"
 REALITY_SERVER_NAME = "www.microsoft.com"
 
+# Listen/dial port shared by Hop A (client-facing) and Hop B (backhaul) - matches
+# REALITY_DEST's own port and provisioning/group_vars/entry_nodes.yml's firewall rule
+# (ufw allows 443/tcp on entry nodes specifically because Hop A listens here). Both
+# build_hopa_inbound_json and build_hopb_inbound_json used to omit "port" entirely -
+# agent/src/dist_vpn_agent/xray_client.py's _build_inbound_handler_config treats it as
+# *optional* (silently produces an inbound with no port_list, i.e. nothing actually
+# listening) rather than raising, so this was a second, independent hard blocker beyond
+# the empty REALITY keys - found while writing the two-VDS deployment walkthrough.
+HOP_LISTEN_PORT = 443
+
 
 def build_hopa_inbound_json(cascade_id: str, hop_a_preset: str, reality_private_key: str, reality_short_id: str) -> str:
     """Entry-node (Hop A), client-facing inbound. Defaults to VLESS+REALITY on raw TCP
@@ -91,6 +101,8 @@ def build_hopa_inbound_json(cascade_id: str, hop_a_preset: str, reality_private_
     return json.dumps(
         {
             "tag": hopa_inbound_tag(cascade_id),
+            "listen": "0.0.0.0",
+            "port": HOP_LISTEN_PORT,
             "protocol": "vless",
             "settings": {"clients": [], "decryption": "none"},
             "streamSettings": {
@@ -133,7 +145,7 @@ def build_hopb_outbound_json(
                 "vnext": [
                     {
                         "address": exit_endpoint,
-                        "port": 443,
+                        "port": HOP_LISTEN_PORT,
                         "users": [{"id": "", "encryption": "none", "flow": ""}],
                     }
                 ]
@@ -162,6 +174,8 @@ def build_hopb_inbound_json(cascade_id: str, reality_private_key: str, reality_s
     return json.dumps(
         {
             "tag": hopb_inbound_tag(cascade_id),
+            "listen": "0.0.0.0",
+            "port": HOP_LISTEN_PORT,
             "protocol": "vless",
             "settings": {"clients": [], "decryption": "none"},
             "streamSettings": {
@@ -195,10 +209,10 @@ def build_vless_uri(
     to match AddUser.flow in api/routes/users.py (no confirmed preset->flow mapping
     survived the TZ-4 §3 loss this project inherited - see that file's docstring).
 
-    Port 443 matches REALITY_DEST's convention above and the Hop A inbound's own port
+    Port matches HOP_LISTEN_PORT above, i.e. the Hop A inbound's actual listen port
     (not independently configurable in this slice - see platform/README.md TODO on
     preset port selection)."""
-    port = 443
+    port = HOP_LISTEN_PORT
     params = {
         "security": "reality",
         "sni": REALITY_SERVER_NAME,
