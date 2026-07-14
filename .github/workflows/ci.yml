@@ -1,0 +1,115 @@
+name: CI
+
+# Runs on every PR into main (the develop -> main promotion gate) and on every
+# push to develop (so problems surface as soon as they land there, even though
+# develop itself has no required-PR gate - see README.md "Ветвление").
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [develop]
+
+jobs:
+  platform-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: platform
+        run: pip install -e ".[dev]"
+      - name: Generate gRPC stubs
+        working-directory: platform
+        run: python scripts/gen_proto.py
+      - name: Run tests
+        working-directory: platform
+        run: pytest -q
+
+  agent-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: agent
+        run: pip install -e .
+      - name: Generate gRPC stubs
+        working-directory: agent
+        run: bash scripts/gen_proto.sh
+      # Docker is preinstalled and running on GitHub-hosted ubuntu-latest
+      # runners, so the tests/test_real_xray_core_*/test_real_docker_engine_*
+      # cases actually execute here (pull ghcr.io/xtls/xray-core, run real
+      # containers) rather than skipping - same "verify against the real
+      # thing, not just mocks" bar the rest of this project holds itself to.
+      # That means this job is slower and depends on ghcr.io being reachable;
+      # tests that genuinely can't reach Docker skip themselves gracefully
+      # (see tests/test_xray_client.py / test_docker_manager.py).
+      #
+      # AGENT_TEST_SKIP_CONTAINER_EGRESS_TESTS: confirmed empirically (first
+      # real CI run) that spawned containers on this runner get no outbound
+      # network path at all - not flaky, not "no internet to example.com
+      # specifically", genuinely no route (even a deliberately non-routable
+      # "black hole" target fails immediately instead of timing out). See
+      # tests/conftest.py::container_egress for exactly which tests this
+      # skips and why - unset for local development, where they still run
+      # for real.
+      - name: Run tests
+        working-directory: agent
+        env:
+          AGENT_TEST_SKIP_CONTAINER_EGRESS_TESTS: "1"
+        run: pytest -q
+
+  admin-client-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: admin-client/package-lock.json
+      - name: Install dependencies
+        working-directory: admin-client
+        run: npm ci
+      - name: Lint
+        working-directory: admin-client
+        run: npm run lint
+      - name: Typecheck + build
+        working-directory: admin-client
+        run: npm run build
+      - name: Test
+        working-directory: admin-client
+        run: npm test
+
+  provisioning-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible + lint tools
+        run: pip install ansible-core ansible-lint yamllint
+      - name: Install required collections
+        working-directory: provisioning
+        run: ansible-galaxy collection install -r requirements.yml
+      # Run both linters even if the first one finds something, so a single
+      # CI run surfaces every finding at once instead of yamllint blocking
+      # ansible-lint from ever running (GitHub Actions stops a job at the
+      # first failing step by default) - neither tool can be previewed on
+      # Windows (see provisioning/.ansible-lint's own note), so minimizing
+      # round-trips here actually matters.
+      - name: yamllint + ansible-lint
+        working-directory: provisioning
+        run: |
+          set +e
+          yamllint .
+          yamllint_status=$?
+          ansible-lint
+          ansible_status=$?
+          set -e
+          exit $(( yamllint_status != 0 || ansible_status != 0 ))

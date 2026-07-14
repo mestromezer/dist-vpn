@@ -56,6 +56,15 @@ class UserConnectionOut(BaseModel):
     platform/README.md "Отклонения от ТЗ")."""
 
     vless_uri: str
+    # Second URI for the optional P4 preset (VLESS+TLS/WebSocket) - present only when
+    # the cascade actually requested "p4" (Cascade.hop_a_presets) AND the entry node
+    # has Node.p4_domain set; None otherwise, not an empty string, so a client can
+    # distinguish "P4 wasn't requested/configured" from "P4 URI happens to be empty".
+    vless_uri_p4: str | None = None
+    # Xray-compatible routing rule objects (direct-route local resources, block known
+    # IP-checking services) a client can drop into its own config - see
+    # services/xray_templates.py build_client_routing_rules().
+    routing_rules: list[dict] = []
 
 
 class UserDeviceKickEventOut(BaseModel):

@@ -430,7 +430,7 @@ async def test_real_xray_core_get_users_stats_no_traffic_yet(real_xray_address):
 
 
 @pytest.mark.asyncio
-async def test_real_xray_core_get_users_stats_with_real_traffic():
+async def test_real_xray_core_get_users_stats_with_real_traffic(container_egress):
     """Full loopback proof: a second, genuine Xray-core container acts as a VLESS
     *client* dialing a server this test stands up itself, proxies one real HTTP
     request through it, and confirms get_users_stats() then reports that user's
@@ -442,6 +442,11 @@ async def test_real_xray_core_get_users_stats_with_real_traffic():
     fallback (GetAllOnlineUsers + GetStatsOnlineIpList + QueryStats) is what that
     specific real version actually supports - now automated instead of only having
     been checked by hand once.
+
+    The one real HTTP request above goes to example.com - needs container_egress
+    (see tests/conftest.py) for the same reason as the connectivity_test.py real
+    tests: GitHub Actions' ubuntu-latest runners give spawned containers no
+    outbound network path at all.
 
     Deliberately does NOT use the shared real_xray_address fixture above: that
     fixture's server container only publishes its API port at creation time (the

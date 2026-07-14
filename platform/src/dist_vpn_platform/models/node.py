@@ -39,6 +39,16 @@ class Node(Base):
     # admin-set via PATCH /nodes/{id} (schemas/nodes.py NodePatchRequest), never inferred.
     # Required (only) to compose a client vless:// URI - see api/routes/users.py.
     public_address: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Domain name for the optional P4 preset (VLESS+TLS/WebSocket, TZ-4 §3.3/§3.4) - a
+    # real, admin-owned domain with a real TLS cert on this entry node (see
+    # services/xray_templates.py P4_LISTEN_PORT/build_hopa_p4_inbound_json's module
+    # docstring for the cert-provisioning caveat), optionally CDN-fronted. Separate from
+    # `public_address` above: REALITY (the default preset) deliberately does NOT use a
+    # real domain/cert at all - P4 exists specifically as a fallback preset for when a
+    # client can't reach the entry node's raw IP directly. Admin-set via PATCH
+    # /nodes/{id}, same pattern as public_address; only used (only required) when a
+    # cascade actually requests the "p4" preset.
+    p4_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[NodeRole] = mapped_column(sa_enum(NodeRole), nullable=False)
     region: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[NodeStatus] = mapped_column(
