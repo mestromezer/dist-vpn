@@ -40,6 +40,7 @@ from dist_vpn_platform.models.usage_stat import UsageStat
 from dist_vpn_platform.models.user import User
 from dist_vpn_platform.security import mtls_ca
 from dist_vpn_platform.security.enrollment_tokens import hash_token
+from dist_vpn_platform.services.event_bus import publish_health_event
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +304,13 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             return pb.EnrollmentAck(node_id=node.id, accepted=True, mtls_client_cert_pem=client_cert_pem)
 
     async def _handle_heartbeat(self, heartbeat: pb.Heartbeat) -> None:
+        # `event` is published only after the transaction below actually commits (see
+        # the `async with` block's exit) - same publish-after-commit ordering as
+        # api/routes/cascades.py::create_cascade and api/routes/nodes.py::decommission_
+        # node, so a WS /events subscriber is never notified about a status change that
+        # a concurrent rollback could still discard.
+        event: HealthEvent | None = None
+
         async with session_scope() as db:
             node = await db.get(Node, heartbeat.node_id)
             if node is None:
@@ -330,19 +338,21 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             await db.flush()
 
             if node.status != previous_status:
-                db.add(
-                    HealthEvent(
-                        node_id=node.id,
-                        from_status=previous_status.value,
-                        to_status=node.status.value,
-                        reason="heartbeat",
-                    )
+                event = HealthEvent(
+                    node_id=node.id,
+                    from_status=previous_status.value,
+                    to_status=node.status.value,
+                    reason="heartbeat",
                 )
+                db.add(event)
                 await db.flush()
                 logger.info(
                     "node_status_changed",
                     extra={"node_id": node.id, "from": previous_status.value, "to": node.status.value},
                 )
+
+        if event is not None:
+            publish_health_event(event)  # TZ-5 §4.3: push to WS /events subscribers
 
     async def _handle_telemetry(self, telemetry: pb.TelemetryReport) -> None:
         """Persist TelemetryReport.counters into UsageStat rows (TZ-5 §4.4/§6.4 - byte

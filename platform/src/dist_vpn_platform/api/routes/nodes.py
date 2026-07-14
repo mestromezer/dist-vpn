@@ -29,6 +29,7 @@ from dist_vpn_platform.schemas.nodes import (
     NodePatchRequest,
 )
 from dist_vpn_platform.security.enrollment_tokens import generate_token, hash_token
+from dist_vpn_platform.services.event_bus import publish_health_event
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("dist_vpn_platform.audit")
@@ -145,15 +146,15 @@ async def decommission_node(
     # slice only guarantees the Platform-side registry no longer references the node.
     await db.execute(delete(CascadeExitNode).where(CascadeExitNode.exit_node_id == node_id))
 
-    db.add(
-        HealthEvent(
-            node_id=node_id,
-            from_status=previous_status.value,
-            to_status=NodeStatus.DECOMMISSIONED.value,
-            reason=f"Decommissioned by admin {admin.username}",
-        )
+    health_event = HealthEvent(
+        node_id=node_id,
+        from_status=previous_status.value,
+        to_status=NodeStatus.DECOMMISSIONED.value,
+        reason=f"Decommissioned by admin {admin.username}",
     )
+    db.add(health_event)
     await db.commit()
 
+    publish_health_event(health_event)  # TZ-5 §4.3: push to WS /events subscribers
     audit_logger.info("node_decommissioned", extra={"admin_id": admin.id, "node_id": node_id})
     return {"detail": "accepted", "node_id": node_id}
