@@ -33,11 +33,15 @@ from dist_vpn_platform.models.admin_account import AdminAccount
 from dist_vpn_platform.models.cascade import Cascade
 from dist_vpn_platform.models.node import Node
 from dist_vpn_platform.models.user import User, UserCascade
+from dist_vpn_platform.models.user_device_kick_event import UserDeviceKickEvent
 from dist_vpn_platform.schemas.users import (
     UserConnectionOut,
     UserCreateRequest,
+    UserDeviceKickEventListResponse,
+    UserDeviceKickEventOut,
     UserListResponse,
     UserOut,
+    UserPatchRequest,
 )
 from dist_vpn_platform.services import xray_templates as xray
 
@@ -72,6 +76,9 @@ async def list_users(
                 name=u.name,
                 uuid=u.uuid,
                 cascade_ids=u.cascade_ids,
+                max_devices=u.max_devices,
+                last_online_device_count=u.last_online_device_count,
+                last_online_at=u.last_online_at,
                 created_at=u.created_at,
                 revoked_at=u.revoked_at,
             )
@@ -95,8 +102,8 @@ async def create_user(
         cascades.append(cascade)
 
     # id and uuid are both server-generated (models/user.py `default=new_uuid` on both
-    # columns) - the request body only ever supplies `name`/`cascade_ids`.
-    user = User(name=body.name)
+    # columns) - the request body only ever supplies `name`/`cascade_ids`/`max_devices`.
+    user = User(name=body.name, max_devices=body.max_devices)
     db.add(user)
     await db.flush()
 
@@ -133,6 +140,9 @@ async def create_user(
         name=user.name,
         uuid=user.uuid,
         cascade_ids=[c.id for c in cascades],
+        max_devices=user.max_devices,
+        last_online_device_count=user.last_online_device_count,
+        last_online_at=user.last_online_at,
         created_at=user.created_at,
         revoked_at=None,
     )
@@ -154,6 +164,50 @@ async def get_user(
         name=user.name,
         uuid=user.uuid,
         cascade_ids=user.cascade_ids,
+        max_devices=user.max_devices,
+        last_online_device_count=user.last_online_device_count,
+        last_online_at=user.last_online_at,
+        created_at=user.created_at,
+        revoked_at=user.revoked_at,
+    )
+
+
+@router.patch("/{user_id}", response_model=UserOut)
+async def patch_user(
+    user_id: str,
+    body: UserPatchRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminAccount = Depends(require_admin),
+) -> UserOut:
+    """Not in contracts/rest/openapi.yaml - see schemas/users.py UserPatchRequest
+    docstring. Only max_devices is settable this slice (no other User field has a
+    real admin-editing need yet); explicit `null` means unlimited, distinct from
+    omitting the field (which the request schema's default makes indistinguishable
+    from `null` at the JSON level - FastAPI/Pydantic can't tell "key absent" from
+    "key: null" with a plain `Optional[int] = None` field, so this endpoint always
+    applies whatever value comes through, including None - a real, accepted
+    limitation of this minimal request shape, not a bug: there is no scenario in
+    this slice where an admin needs to PATCH a User without touching max_devices)."""
+    stmt = select(User).options(selectinload(User.cascade_links)).where(User.id == user_id)
+    user = (await db.execute(stmt)).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+
+    user.max_devices = body.max_devices
+    await db.commit()
+    await db.refresh(user)
+
+    audit_logger.info(
+        "user_patched", extra={"admin_id": admin.id, "user_id": user_id, "max_devices": body.max_devices}
+    )
+    return UserOut(
+        id=user.id,
+        name=user.name,
+        uuid=user.uuid,
+        cascade_ids=user.cascade_ids,
+        max_devices=user.max_devices,
+        last_online_device_count=user.last_online_device_count,
+        last_online_at=user.last_online_at,
         created_at=user.created_at,
         revoked_at=user.revoked_at,
     )
@@ -236,3 +290,38 @@ async def get_user_connection(
         label=f"{user.name}-{cascade.id[:8]}",
     )
     return UserConnectionOut(vless_uri=vless_uri)
+
+
+@router.get("/{user_id}/device-events", response_model=UserDeviceKickEventListResponse)
+async def list_user_device_events(
+    user_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    _admin: AdminAccount = Depends(require_admin),
+) -> UserDeviceKickEventListResponse:
+    """Audit trail of device-limit kicks (UserDeviceKickEvent, written by
+    grpc_server/servicer.py::_handle_telemetry when a node reports more online IPs
+    for this user than User.max_devices allows) - not in contracts/rest/openapi.yaml,
+    same additive posture as the other deviations in this file."""
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+
+    total = (
+        await db.execute(
+            select(func.count()).select_from(UserDeviceKickEvent).where(UserDeviceKickEvent.user_id == user_id)
+        )
+    ).scalar_one()
+    stmt = (
+        select(UserDeviceKickEvent)
+        .where(UserDeviceKickEvent.user_id == user_id)
+        .order_by(UserDeviceKickEvent.kicked_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    items = (await db.execute(stmt)).scalars().all()
+
+    return UserDeviceKickEventListResponse(
+        items=[UserDeviceKickEventOut.model_validate(item) for item in items], total=total
+    )

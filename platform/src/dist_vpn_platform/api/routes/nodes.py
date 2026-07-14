@@ -21,12 +21,15 @@ from dist_vpn_platform.models.cascade import CascadeExitNode
 from dist_vpn_platform.models.enrollment_token import EnrollmentToken
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
+from dist_vpn_platform.models.node_resource_sample import NodeResourceSample
 from dist_vpn_platform.schemas.nodes import (
     NodeEnrollRequest,
     NodeEnrollResponse,
     NodeListResponse,
     NodeOut,
     NodePatchRequest,
+    NodeResourceSampleListResponse,
+    NodeResourceSampleOut,
 )
 from dist_vpn_platform.security.enrollment_tokens import generate_token, hash_token
 from dist_vpn_platform.services.event_bus import publish_health_event
@@ -160,3 +163,42 @@ async def decommission_node(
     publish_health_event(health_event)  # TZ-5 §4.3: push to WS /events subscribers
     audit_logger.info("node_decommissioned", extra={"admin_id": admin.id, "node_id": node_id})
     return {"detail": "accepted", "node_id": node_id}
+
+
+@router.get("/{node_id}/resource-samples", response_model=NodeResourceSampleListResponse)
+async def list_node_resource_samples(
+    node_id: str,
+    since: datetime | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+    _admin: AdminAccount = Depends(require_admin),
+) -> NodeResourceSampleListResponse:
+    """Time series for correlating resource cost against user/device count over time
+    (models/node_resource_sample.py, written once per Heartbeat in
+    grpc_server/servicer.py::_handle_heartbeat) - not in contracts/rest/openapi.yaml,
+    same additive posture as the other deviations in this file. `since` filters to
+    samples at or after that timestamp; without it, the most recent `page_size`
+    samples are returned (newest first)."""
+    node = await db.get(Node, node_id)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Node not found")
+
+    count_stmt = select(func.count()).select_from(NodeResourceSample).where(NodeResourceSample.node_id == node_id)
+    stmt = (
+        select(NodeResourceSample)
+        .where(NodeResourceSample.node_id == node_id)
+        .order_by(NodeResourceSample.sampled_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    if since is not None:
+        count_stmt = count_stmt.where(NodeResourceSample.sampled_at >= since)
+        stmt = stmt.where(NodeResourceSample.sampled_at >= since)
+
+    total = (await db.execute(count_stmt)).scalar_one()
+    items = (await db.execute(stmt)).scalars().all()
+
+    return NodeResourceSampleListResponse(
+        items=[NodeResourceSampleOut.model_validate(item) for item in items], total=total
+    )

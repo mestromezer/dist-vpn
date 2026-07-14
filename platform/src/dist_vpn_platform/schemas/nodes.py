@@ -44,3 +44,25 @@ class NodePatchRequest(BaseModel):
     role: NodeRole | None = None
     label: str | None = None
     public_address: str | None = None
+
+
+class NodeResourceSampleOut(BaseModel):
+    """See models/node_resource_sample.py and api/routes/nodes.py
+    GET /nodes/{node_id}/resource-samples - not in contracts/rest/openapi.yaml, same
+    additive posture as the other deviations documented in platform/README.md."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    sampled_at: datetime
+    cpu_percent: float
+    mem_percent: float
+    disk_percent: float
+    provisioned_user_count: int
+    online_user_count: int
+    online_device_count: int
+
+
+class NodeResourceSampleListResponse(BaseModel):
+    items: list[NodeResourceSampleOut]
+    total: int
