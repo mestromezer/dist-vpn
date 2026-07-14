@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dist-vpn-platform"
+version = "0.1.0"
+description = "dist-vpn Platform: central control server (node pool, cascades, users, monitoring) for the dist-vpn fleet. See docs/TZ-5-platform.md."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
+    "asyncpg>=0.29,<1.0",
+    "alembic>=1.13,<2.0",
+    "pydantic-settings>=2.4,<3.0",
+    "grpcio>=1.66,<2.0",
+    "grpcio-tools>=1.66,<2.0",
+    "argon2-cffi>=23.1,<24.0",
+    "pyjwt>=2.9,<3.0",
+    "pyotp>=2.9,<3.0",
+    "slowapi>=0.1.9,<1.0",
+    "python-json-logger>=2.0,<3.0",
+    # mTLS CA (TZ-5 §6.2, see security/mtls_ca.py) - CA/leaf cert generation and CSR
+    # signing, in-process instead of an external step-ca service for this slice.
+    "cryptography>=43.0,<44.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<1.0",
+    "httpx>=0.27,<1.0",
+    "aiosqlite>=0.20,<1.0",
+    # WS /events tests (see tests/test_events.py) - drives a real ASGI websocket
+    # upgrade over httpx's ASGITransport, same async-test style as the rest of this
+    # suite (unlike starlette.testclient.TestClient, which is sync-only).
+    "httpx-ws>=0.6,<1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

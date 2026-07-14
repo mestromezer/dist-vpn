@@ -167,6 +167,7 @@ paths:
               properties:
                 role: { $ref: "#/components/schemas/NodeRole" }
                 label: { type: string }
+                public_address: { type: string }
       responses:
         "200":
           content:
@@ -339,6 +340,29 @@ paths:
       responses:
         "204": { description: OK }
 
+  /users/{user_id}/connection/{cascade_id}:
+    # Добавлено после реализации Platform (тот же паттерн, что и /auth/change-password
+    # выше) - ТЗ-5 §4.4/§9 требует, чтобы связка реально заработала для клиента, а
+    # без готовой vless:// ссылки ни один шаг ТЗ не проверяем end-to-end: до этого
+    # POST /users отдавал только uuid, а Hop A REALITY-инбаунд собирался с пустым
+    # приватным ключом (см. platform/README.md "Отклонения от ТЗ") - оба пробела
+    # закрыты вместе в этом слайсе.
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: string } }
+      - { name: cascade_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: >-
+        Готовая vless:// ссылка для импорта в клиент (REALITY, Hop A этой связки).
+        400, если у entry-ноды каскада не задан public_address (PATCH /nodes/{node_id}).
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  vless_uri: { type: string }
+
   /usage:
     get:
       summary: Агрегированная статистика потребления — только байтовые счётчики (TZ-5 §6.4)
@@ -396,6 +420,16 @@ components:
         status: { $ref: "#/components/schemas/NodeStatus" }
         agent_version: { type: string }
         last_heartbeat_at: { type: string, format: date-time }
+        public_address:
+          type: string
+          description: >-
+            Публичный адрес (IP или DNS-имя), по которому клиент должен подключаться,
+            если эта нода — entry. Добавлено после реализации Platform (изначально
+            поле было только в реализации, не в контракте, тот же паттерн, что и
+            TokenPair.must_change_password выше) — админ-задаваемое через PATCH
+            /nodes/{node_id}, никогда не выводится из Node.hostname (тот
+            self-reported агентом при enrollment и не обязательно совпадает с
+            публичным адресом).
 
     CascadeInput:
       type: object
@@ -417,6 +451,16 @@ components:
         exit_node_ids: { type: array, items: { type: string } }
         status: { $ref: "#/components/schemas/CascadeStatus" }
         hop_a_presets: { type: array, items: { type: string } }
+        hopa_reality_public_key:
+          type: string
+          description: >-
+            Публичный REALITY-ключ Hop A (клиентского) инбаунда этой связки — только
+            публичная часть, приватный ключ никогда не покидает Platform. Добавлено
+            после реализации Platform, тот же паттерн, что и Node.public_address выше.
+            Нужен вместе с hopa_reality_short_id для сборки vless:// (см. GET
+            /users/{user_id}/connection/{cascade_id}).
+        hopa_reality_short_id:
+          type: string
 
     HealthEvent:
       type: object

@@ -1,0 +1,60 @@
+# Local dev stack (TZ-5 §8 - "единая команда развёртывания: docker compose up").
+# Run from anywhere with: `docker compose -f platform/docker-compose.yml up --build`
+# (build context is the repo root - see the `platform` service below - so the image
+# can see contracts/proto/agent_control.proto; see platform/Dockerfile).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      POSTGRES_DB: platform
+    ports:
+      - "${PLATFORM_HOST_DB_PORT:-5432}:5432"
+    volumes:
+      - platform_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  platform:
+    build:
+      context: ..
+      dockerfile: platform/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PLATFORM_DATABASE_URL: postgresql+asyncpg://platform:platform@db:5432/platform
+      PLATFORM_ENV: dev
+      # Dev-only placeholder - override with a real random secret via a `.env` file or
+      # the deployment platform's secret store outside of dev (TZ-5 §6.3).
+      PLATFORM_JWT_SECRET_KEY: dev-only-insecure-secret-change-me
+      PLATFORM_LOG_LEVEL: INFO
+      # TZ-5 §6.2: persistent mTLS CA (see security/mtls_ca.py) - generated once into
+      # the platform_mtls_ca volume below and reused across container recreation.
+      # Override PLATFORM_MTLS_SERVER_SANS if Agents will dial this host by a name
+      # other than localhost/127.0.0.1 (comma-separated).
+      PLATFORM_MTLS_CA_DIR: /var/lib/dist-vpn-platform/ca
+      PLATFORM_MTLS_SERVER_SANS: ${PLATFORM_MTLS_SERVER_SANS:-localhost,127.0.0.1}
+    ports:
+      # Host ports are overridable (`PLATFORM_HOST_HTTP_PORT=8001 docker compose ...`)
+      # in case 8000/50051 are already taken on the host by something else.
+      - "${PLATFORM_HOST_HTTP_PORT:-8000}:8000"   # REST/WebSocket API for Admin Client
+      - "${PLATFORM_HOST_GRPC_PORT:-50051}:50051" # gRPC AgentControl for Agents
+    volumes:
+      # Persistent CA/server-cert storage (TZ-5 §6.2) - survives `docker compose down`
+      # (without -v) and container recreation; the CA private key is generated once,
+      # on first startup, and never regenerated as long as this volume exists. See
+      # security/mtls_ca.py for the one-time console message pointing operators at
+      # ca-cert.pem for distribution to Agents.
+      - platform_mtls_ca:/var/lib/dist-vpn-platform/ca
+    # No bind mount for code in this container-first setup - rebuild the image after
+    # source changes (`docker compose -f platform/docker-compose.yml up --build`).
+    # Add `volumes: ["./src:/app/platform/src"]` here if you want live-reload instead.
+
+volumes:
+  platform_pg_data:
+  platform_mtls_ca:
