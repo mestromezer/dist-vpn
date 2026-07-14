@@ -20,6 +20,12 @@ class CascadeOut(BaseModel):
     exit_node_ids: list[str]
     status: CascadeStatus
     hop_a_presets: list[str]
+    # Public REALITY identity for this cascade's Hop A (client-facing) inbound - never
+    # the private key (models/cascade.py Cascade.hopa_reality_private_key is never
+    # serialized here). Needed by the admin/client to compose a working vless:// URI
+    # (see api/routes/users.py's connection endpoint, which composes it server-side).
+    hopa_reality_public_key: str | None = None
+    hopa_reality_short_id: str | None = None
 
 
 class CascadeListResponse(BaseModel):

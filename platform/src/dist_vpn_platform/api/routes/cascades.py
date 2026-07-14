@@ -42,6 +42,7 @@ from dist_vpn_platform.models.node import Node
 from dist_vpn_platform.models.user import UserCascade
 from dist_vpn_platform.schemas.cascades import CascadeInput, CascadeListResponse, CascadeOut
 from dist_vpn_platform.schemas.tests import LinkTestListResponse, LinkTestOut, LinkTestStartResponse
+from dist_vpn_platform.security import reality_keys
 from dist_vpn_platform.services import link_tests
 from dist_vpn_platform.services import xray_templates as xray
 from dist_vpn_platform.services.event_bus import publish_health_event
@@ -80,6 +81,8 @@ async def list_cascades(
                 exit_node_ids=c.exit_node_ids,
                 status=c.status,
                 hop_a_presets=c.hop_a_presets,
+                hopa_reality_public_key=c.hopa_reality_public_key,
+                hopa_reality_short_id=c.hopa_reality_short_id,
             )
             for c in items
         ],
@@ -104,16 +107,30 @@ async def create_cascade(
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"exit node not found: {exit_node_id}")
         exit_nodes.append(exit_node)
 
+    hopa_private_key, hopa_public_key = reality_keys.generate_reality_keypair()
     cascade = Cascade(
         entry_node_id=entry_node.id,
         hop_a_presets=list(body.hop_a_presets),
         status=CascadeStatus.DOWN,
+        hopa_reality_private_key=hopa_private_key,
+        hopa_reality_public_key=hopa_public_key,
+        hopa_reality_short_id=reality_keys.generate_short_id(),
     )
     db.add(cascade)
     await db.flush()  # assign cascade.id before it's referenced below
 
+    exit_links: dict[str, CascadeExitNode] = {}
     for exit_node in exit_nodes:
-        db.add(CascadeExitNode(cascade_id=cascade.id, exit_node_id=exit_node.id))
+        hopb_private_key, hopb_public_key = reality_keys.generate_reality_keypair()
+        link = CascadeExitNode(
+            cascade_id=cascade.id,
+            exit_node_id=exit_node.id,
+            hopb_reality_private_key=hopb_private_key,
+            hopb_reality_public_key=hopb_public_key,
+            hopb_reality_short_id=reality_keys.generate_short_id(),
+        )
+        db.add(link)
+        exit_links[exit_node.id] = link
     await db.flush()
 
     hop_a_preset = body.hop_a_presets[0] if body.hop_a_presets else "p1"
@@ -122,20 +139,29 @@ async def create_cascade(
         entry_node.id,
         pb.Command(
             command_id=new_command_id(),
-            add_inbound=pb.AddInbound(inbound_json=xray.build_hopa_inbound_json(cascade.id, hop_a_preset)),
+            add_inbound=pb.AddInbound(
+                inbound_json=xray.build_hopa_inbound_json(
+                    cascade.id, hop_a_preset, cascade.hopa_reality_private_key, cascade.hopa_reality_short_id
+                )
+            ),
         ),
         context=f"cascade {cascade.id} hopa inbound",
     )
 
     exit_ok_count = 0
     for exit_node in exit_nodes:
+        link = exit_links[exit_node.id]
         outbound_ok = await dispatch_best_effort(
             entry_node.id,
             pb.Command(
                 command_id=new_command_id(),
                 add_outbound=pb.AddOutbound(
                     outbound_json=xray.build_hopb_outbound_json(
-                        cascade.id, exit_node.id, exit_node.hostname or exit_node.id
+                        cascade.id,
+                        exit_node.id,
+                        exit_node.public_address or exit_node.hostname or exit_node.id,
+                        link.hopb_reality_public_key,
+                        link.hopb_reality_short_id,
                     )
                 ),
             ),
@@ -147,7 +173,11 @@ async def create_cascade(
             exit_node.id,
             pb.Command(
                 command_id=new_command_id(),
-                add_inbound=pb.AddInbound(inbound_json=xray.build_hopb_inbound_json(cascade.id)),
+                add_inbound=pb.AddInbound(
+                    inbound_json=xray.build_hopb_inbound_json(
+                        cascade.id, link.hopb_reality_private_key, link.hopb_reality_short_id
+                    )
+                ),
             ),
             context=f"cascade {cascade.id} hopb inbound on {exit_node.id}",
         )
@@ -196,6 +226,8 @@ async def create_cascade(
         exit_node_ids=[n.id for n in exit_nodes],
         status=cascade.status,
         hop_a_presets=cascade.hop_a_presets,
+        hopa_reality_public_key=cascade.hopa_reality_public_key,
+        hopa_reality_short_id=cascade.hopa_reality_short_id,
     )
 
 
@@ -216,6 +248,8 @@ async def get_cascade(
         exit_node_ids=cascade.exit_node_ids,
         status=cascade.status,
         hop_a_presets=cascade.hop_a_presets,
+        hopa_reality_public_key=cascade.hopa_reality_public_key,
+        hopa_reality_short_id=cascade.hopa_reality_short_id,
     )
 
 
