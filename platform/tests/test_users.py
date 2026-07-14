@@ -267,3 +267,78 @@ async def test_get_connection_for_cascade_user_is_not_granted_is_404(
         assert response.status_code == 404
     finally:
         await entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_create_user_defaults_to_default_max_devices(client: AsyncClient, seeded_admin: dict) -> None:
+    token = await _login(client, seeded_admin)
+    response = await client.post(
+        "/users", json={"name": "henry", "cascade_ids": []}, headers=_auth_headers(token)
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["max_devices"] == 3  # models/user.py DEFAULT_MAX_DEVICES
+    assert body["last_online_device_count"] == 0
+    assert body["last_online_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_user_can_set_explicit_max_devices(client: AsyncClient, seeded_admin: dict) -> None:
+    token = await _login(client, seeded_admin)
+    response = await client.post(
+        "/users", json={"name": "ivan", "cascade_ids": [], "max_devices": 10}, headers=_auth_headers(token)
+    )
+    assert response.status_code == 201
+    assert response.json()["max_devices"] == 10
+
+
+@pytest.mark.asyncio
+async def test_patch_user_updates_max_devices(client: AsyncClient, seeded_admin: dict) -> None:
+    token = await _login(client, seeded_admin)
+    create_response = await client.post(
+        "/users", json={"name": "julia", "cascade_ids": []}, headers=_auth_headers(token)
+    )
+    user_id = create_response.json()["id"]
+
+    patch_response = await client.patch(
+        f"/users/{user_id}", json={"max_devices": 7}, headers=_auth_headers(token)
+    )
+    assert patch_response.status_code == 200
+    assert patch_response.json()["max_devices"] == 7
+
+    # Explicit null means unlimited, distinct from omitting the field entirely -
+    # see schemas/users.py UserPatchRequest docstring.
+    unlimited_response = await client.patch(
+        f"/users/{user_id}", json={"max_devices": None}, headers=_auth_headers(token)
+    )
+    assert unlimited_response.status_code == 200
+    assert unlimited_response.json()["max_devices"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_missing_user_is_404(client: AsyncClient, seeded_admin: dict) -> None:
+    token = await _login(client, seeded_admin)
+    response = await client.patch(
+        "/users/does-not-exist", json={"max_devices": 5}, headers=_auth_headers(token)
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_user_device_events_empty_by_default(client: AsyncClient, seeded_admin: dict) -> None:
+    token = await _login(client, seeded_admin)
+    create_response = await client.post(
+        "/users", json={"name": "karen", "cascade_ids": []}, headers=_auth_headers(token)
+    )
+    user_id = create_response.json()["id"]
+
+    response = await client.get(f"/users/{user_id}/device-events", headers=_auth_headers(token))
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_list_device_events_for_missing_user_is_404(client: AsyncClient, seeded_admin: dict) -> None:
+    token = await _login(client, seeded_admin)
+    response = await client.get("/users/does-not-exist/device-events", headers=_auth_headers(token))
+    assert response.status_code == 404

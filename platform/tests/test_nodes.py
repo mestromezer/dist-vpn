@@ -89,3 +89,78 @@ async def test_get_missing_node_is_404(client: AsyncClient, seeded_admin: dict) 
     token = await _login(client, seeded_admin)
     response = await client.get("/nodes/does-not-exist", headers=_auth_headers(token))
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_resource_samples_missing_node_is_404(client: AsyncClient, seeded_admin: dict) -> None:
+    token = await _login(client, seeded_admin)
+    response = await client.get("/nodes/does-not-exist/resource-samples", headers=_auth_headers(token))
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_resource_samples_empty_by_default(client: AsyncClient, seeded_admin: dict) -> None:
+    from dist_vpn_platform.db import session_scope
+    from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
+
+    async with session_scope() as db:
+        node = Node(label="fresh-node", role=NodeRole.ENTRY, status=NodeStatus.HEALTHY)
+        db.add(node)
+        await db.flush()
+        node_id = node.id
+
+    token = await _login(client, seeded_admin)
+    response = await client.get(f"/nodes/{node_id}/resource-samples", headers=_auth_headers(token))
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_resource_samples_returns_newest_first_and_filters_by_since(
+    client: AsyncClient, seeded_admin: dict
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from dist_vpn_platform.db import session_scope
+    from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
+    from dist_vpn_platform.models.node_resource_sample import NodeResourceSample
+
+    async with session_scope() as db:
+        node = Node(label="sampled-node", role=NodeRole.ENTRY, status=NodeStatus.HEALTHY)
+        db.add(node)
+        await db.flush()
+        node_id = node.id
+
+        base = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+        for i in range(3):
+            db.add(
+                NodeResourceSample(
+                    node_id=node_id,
+                    sampled_at=base + timedelta(minutes=i * 15),
+                    cpu_percent=10.0 * (i + 1),
+                    mem_percent=20.0,
+                    disk_percent=30.0,
+                    provisioned_user_count=i,
+                    online_user_count=i,
+                    online_device_count=i * 2,
+                )
+            )
+
+    token = await _login(client, seeded_admin)
+
+    all_response = await client.get(f"/nodes/{node_id}/resource-samples", headers=_auth_headers(token))
+    assert all_response.status_code == 200
+    all_body = all_response.json()
+    assert all_body["total"] == 3
+    # Newest first.
+    assert [item["cpu_percent"] for item in all_body["items"]] == [30.0, 20.0, 10.0]
+
+    since_response = await client.get(
+        f"/nodes/{node_id}/resource-samples",
+        params={"since": (base + timedelta(minutes=15)).isoformat()},
+        headers=_auth_headers(token),
+    )
+    assert since_response.status_code == 200
+    since_body = since_response.json()
+    assert since_body["total"] == 2
+    assert [item["cpu_percent"] for item in since_body["items"]] == [30.0, 20.0]

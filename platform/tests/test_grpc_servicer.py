@@ -8,18 +8,21 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from dist_vpn_platform.db import session_scope
 from dist_vpn_platform.generated import agent_control_pb2 as pb
 from dist_vpn_platform.grpc_server.servicer import AgentControlServicer
+from dist_vpn_platform.models.cascade import Cascade, CascadeStatus
 from dist_vpn_platform.models.enrollment_token import EnrollmentToken
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
+from dist_vpn_platform.models.node_resource_sample import NodeResourceSample
 from dist_vpn_platform.models.usage_stat import UsageStat
-from dist_vpn_platform.models.user import User
+from dist_vpn_platform.models.user import User, UserCascade
+from dist_vpn_platform.models.user_device_kick_event import UserDeviceKickEvent
 from dist_vpn_platform.security.enrollment_tokens import generate_token, hash_token
-from tests.grpc_test_helpers import generate_test_csr_pem
+from tests.grpc_test_helpers import FakeAgent, generate_test_csr_pem
 
 
 async def _seed_enrollment_token() -> str:
@@ -178,3 +181,197 @@ async def test_telemetry_persists_usage_stats_and_resolves_known_user(db_engine:
         assert inbound_row.user_id is None
         assert inbound_row.uplink_bytes == 50
         assert inbound_row.downlink_bytes == 60
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_writes_node_resource_sample(db_engine: None) -> None:
+    plaintext = await _seed_enrollment_token()
+    servicer = AgentControlServicer()
+    ack = await servicer._handle_enrollment(
+        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY, csr_pem=generate_test_csr_pem()),
+        peer="test-peer",
+    )
+
+    async with session_scope() as db:
+        cascade = Cascade(entry_node_id=ack.node_id, status=CascadeStatus.UP)
+        db.add(cascade)
+        await db.flush()
+        for name in ("alice", "bob"):
+            user = User(name=name)
+            db.add(user)
+            await db.flush()
+            db.add(UserCascade(user_id=user.id, cascade_id=cascade.id))
+
+    await servicer._handle_heartbeat(
+        pb.Heartbeat(
+            node_id=ack.node_id,
+            health=pb.NodeHealth(xray_container_running=True, cpu_percent=55.5, mem_percent=60.0, disk_percent=20.0),
+            timestamp_unix=int(time.time()),
+        )
+    )
+
+    async with session_scope() as db:
+        samples = (
+            await db.execute(select(NodeResourceSample).where(NodeResourceSample.node_id == ack.node_id))
+        ).scalars().all()
+        assert len(samples) == 1
+        sample = samples[0]
+        assert sample.cpu_percent == 55.5
+        assert sample.mem_percent == 60.0
+        assert sample.disk_percent == 20.0
+        # Two Users with a UserCascade into a cascade whose entry_node_id is this
+        # node - provisioned, not online (no TelemetryReport.user_online arrived yet
+        # in this test, so online counts stay at their zero default).
+        assert sample.provisioned_user_count == 2
+        assert sample.online_user_count == 0
+        assert sample.online_device_count == 0
+
+    # A second heartbeat must add a second row, not overwrite the first - this is
+    # the whole point of a time series (Node.cpu_percent/etc. already behave as a
+    # latest-value-only snapshot; NodeResourceSample exists specifically not to).
+    await servicer._handle_heartbeat(
+        pb.Heartbeat(
+            node_id=ack.node_id,
+            health=pb.NodeHealth(xray_container_running=True, cpu_percent=70.0, mem_percent=65.0, disk_percent=21.0),
+            timestamp_unix=int(time.time()) + 15,
+        )
+    )
+    async with session_scope() as db:
+        count = (
+            await db.execute(
+                select(func.count()).select_from(NodeResourceSample).where(NodeResourceSample.node_id == ack.node_id)
+            )
+        ).scalar_one()
+        assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_telemetry_user_online_caches_device_count_without_kicking(db_engine: None) -> None:
+    plaintext = await _seed_enrollment_token()
+    servicer = AgentControlServicer()
+    ack = await servicer._handle_enrollment(
+        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY, csr_pem=generate_test_csr_pem()),
+        peer="test-peer",
+    )
+
+    async with session_scope() as db:
+        user = User(name="carol", max_devices=3)
+        db.add(user)
+        await db.flush()
+        user_uuid = user.uuid
+
+    await servicer._handle_telemetry(
+        pb.TelemetryReport(
+            node_id=ack.node_id,
+            timestamp_unix=int(time.time()),
+            user_online=[pb.UserOnlineStat(email=user_uuid, online_ips=["10.0.0.1", "10.0.0.2"])],
+        )
+    )
+
+    async with session_scope() as db:
+        user = (await db.execute(select(User).where(User.uuid == user_uuid))).scalar_one()
+        assert user.last_online_device_count == 2
+        assert user.last_online_at is not None
+
+        kicks = (
+            await db.execute(select(UserDeviceKickEvent).where(UserDeviceKickEvent.user_id == user.id))
+        ).scalars().all()
+        assert kicks == []  # 2 <= max_devices=3, no kick
+
+        node = await db.get(Node, ack.node_id)
+        assert node.last_online_user_count == 1
+        assert node.last_online_device_count == 2
+
+
+@pytest.mark.asyncio
+async def test_telemetry_user_online_over_limit_kicks_and_records_event(db_engine: None) -> None:
+    """The real end-to-end path: a FakeAgent (live SessionRegistry-bound node, see
+    grpc_test_helpers.py) is granted a User whose online-IP count then exceeds
+    max_devices - the servicer must dispatch a real RemoveUser+AddUser pair back to
+    that same connected Agent (forcing every device to reconnect) and persist an
+    audit row, not just update the cached count."""
+    agent = FakeAgent()
+    try:
+        node_id = await agent.connect(NodeRole.ENTRY)
+
+        async with session_scope() as db:
+            cascade = Cascade(entry_node_id=node_id, status=CascadeStatus.UP)
+            db.add(cascade)
+            await db.flush()
+            cascade_id = cascade.id
+            user = User(name="dave", max_devices=2)
+            db.add(user)
+            await db.flush()
+            user_id = user.id
+            user_uuid = user.uuid
+            db.add(UserCascade(user_id=user.id, cascade_id=cascade.id))
+
+        servicer = AgentControlServicer()
+        await servicer._handle_telemetry(
+            pb.TelemetryReport(
+                node_id=node_id,
+                timestamp_unix=int(time.time()),
+                user_online=[
+                    pb.UserOnlineStat(email=user_uuid, online_ips=["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+                ],
+            )
+        )
+
+        # Real dispatch, not just a DB write - the fake Agent actually received and
+        # acked a real RemoveUser+AddUser pair on the cascade's own inbound_tag.
+        assert len(agent.received_commands) == 2
+        remove_cmd, add_cmd = agent.received_commands
+        assert remove_cmd.WhichOneof("op") == "remove_user"
+        assert remove_cmd.remove_user.email == user_uuid
+        assert remove_cmd.remove_user.inbound_tag == f"hopa-in-{cascade_id}"
+        assert add_cmd.WhichOneof("op") == "add_user"
+        assert add_cmd.add_user.email == user_uuid
+        assert add_cmd.add_user.uuid == user_uuid
+        assert add_cmd.add_user.inbound_tag == f"hopa-in-{cascade_id}"
+
+        async with session_scope() as db:
+            kicks = (
+                await db.execute(select(UserDeviceKickEvent).where(UserDeviceKickEvent.user_id == user_id))
+            ).scalars().all()
+            assert len(kicks) == 1
+            assert kicks[0].online_ip_count == 3
+            assert kicks[0].max_devices == 2
+            assert kicks[0].node_id == node_id
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_telemetry_user_online_unlimited_never_kicks(db_engine: None) -> None:
+    plaintext = await _seed_enrollment_token()
+    servicer = AgentControlServicer()
+    ack = await servicer._handle_enrollment(
+        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY, csr_pem=generate_test_csr_pem()),
+        peer="test-peer",
+    )
+
+    async with session_scope() as db:
+        # max_devices=None is an explicit, deliberate "unlimited" opt-out (see
+        # models/user.py User.max_devices docstring) - not the same as 0.
+        user = User(name="erin", max_devices=None)
+        db.add(user)
+        await db.flush()
+        user_uuid = user.uuid
+
+    await servicer._handle_telemetry(
+        pb.TelemetryReport(
+            node_id=ack.node_id,
+            timestamp_unix=int(time.time()),
+            user_online=[
+                pb.UserOnlineStat(email=user_uuid, online_ips=[f"10.0.0.{i}" for i in range(1, 21)])
+            ],
+        )
+    )
+
+    async with session_scope() as db:
+        user = (await db.execute(select(User).where(User.uuid == user_uuid))).scalar_one()
+        assert user.last_online_device_count == 20
+        kicks = (
+            await db.execute(select(UserDeviceKickEvent).where(UserDeviceKickEvent.user_id == user.id))
+        ).scalars().all()
+        assert kicks == []
