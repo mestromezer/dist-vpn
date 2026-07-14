@@ -1,0 +1,188 @@
+---
+- name: Определить фактический тег/имя образа для запуска
+  ansible.builtin.set_fact:
+    agent_effective_image: "{{ agent_image_tag if agent_image_source == 'build_from_source' else agent_registry_image }}"
+
+- name: Определить, передан ли клиентский mTLS-материал
+  ansible.builtin.set_fact:
+    agent_client_cert_provided: "{{ agent_mtls_client_cert_src | length > 0 }}"
+
+# Пути ВНУТРИ контейнера — фиксированы (не настраиваются переменными),
+# чтобы bind-mount (ниже) и переменные окружения AGENT_MTLS_*_PATH,
+# передаваемые в контейнер, не могли рассинхронизироваться.
+- name: Определить пути mTLS-материала внутри контейнера
+  ansible.builtin.set_fact:
+    agent_container_ca_path: /etc/dist-vpn-agent/tls/platform-ca.pem
+    agent_container_client_cert_path: /etc/dist-vpn-agent/tls/client-cert.pem
+    agent_container_client_key_path: /etc/dist-vpn-agent/tls/client-key.pem
+
+- name: Создать каталог для mTLS-материала Agent'а на хосте
+  ansible.builtin.file:
+    path: "{{ agent_mtls_ca_cert_dest | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: not agent_insecure_dev_mode
+
+- name: Скопировать CA-сертификат Platform на целевой хост
+  ansible.builtin.copy:
+    src: "{{ agent_mtls_ca_cert_src }}"
+    dest: "{{ agent_mtls_ca_cert_dest }}"
+    owner: root
+    group: root
+    mode: "0644" # CA-сертификат -- публичный якорь доверия, не секрет сам по себе
+  when: not agent_insecure_dev_mode
+
+- name: Скопировать клиентский mTLS-сертификат ноды (опционально, см. defaults/main.yml)
+  ansible.builtin.copy:
+    src: "{{ agent_mtls_client_cert_src }}"
+    dest: "{{ agent_mtls_client_cert_dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: agent_client_cert_provided | bool
+
+# ВАЖНАЯ ЧЕСТНАЯ ОГОВОРКА про права доступа к приватному ключу: TZ-4 §5.3
+# требует "права доступа 600, отдельный непривилегированный пользователь
+# для процесса Agent". Внутри контейнера Agent реально работает под
+# непривилегированным пользователем `agent` (agent/Dockerfile: `USER
+# agent`), но у bind mount'а (в отличие от именованного Docker volume с
+# chown) нет перетрансляции UID/GID между хостом и контейнером — mode
+# "0600 root:root" на ХОСТЕ сделал бы файл НЕЧИТАЕМЫМ для процесса внутри
+# контейнера (если только UID `agent` внутри контейнера случайно не
+# совпадёт с UID root/иным на хосте, на что нельзя полагаться). Это
+# известный, а не спрятанный компромисс -- см. README "agent_install:
+# ограничение по правам клиентского ключа" за развёрнутым обсуждением
+# альтернатив (именованный volume с init-контейнером chown, Docker
+# secrets и т.д.), ни одна из которых не реализована в этом слайсе.
+# Обновление этого слайса: согласованный дизайн bootstrap mTLS (см.
+# README, "Bootstrap mTLS Agent<->Platform") подтверждает, что этот путь
+# -- edge-case сценарий (восстановление/миграция уже выданной идентичности
+# ноды), а не временная заглушка "пока Agent не научился персистить сам".
+# В штатном enrollment Agent сам генерирует keypair/CSR и сам персистит
+# выданный сертификат внутри собственного процесса -- этот bind-mount там
+# вообще не участвует. Значит, 0644-компромисс относится только к
+# edge-case пути, а не к ситуации, которая станет обязательной по мере
+# созревания Agent'а -- см. defaults/main.yml за полным списком сценариев,
+# для которых поле оставлено.
+- name: Скопировать клиентский mTLS-ключ ноды (опционально, см. defaults/main.yml)
+  ansible.builtin.copy:
+    src: "{{ agent_mtls_client_key_src }}"
+    dest: "{{ agent_mtls_client_key_dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  no_log: true
+  when: agent_client_cert_provided | bool
+
+- name: Собрать список bind-mount'ов mTLS-материала для контейнера
+  ansible.builtin.set_fact:
+    agent_container_volumes: "{{ agent_container_volumes | default([]) + [(agent_mtls_ca_cert_dest ~ ':' ~ agent_container_ca_path ~ ':ro')] }}"
+  when: not agent_insecure_dev_mode
+
+- name: Добавить bind-mount клиентского сертификата/ключа (если заданы)
+  ansible.builtin.set_fact:
+    agent_container_volumes: >-
+      {{ agent_container_volumes | default([]) +
+         [(agent_mtls_client_cert_dest ~ ':' ~ agent_container_client_cert_path ~ ':ro'),
+          (agent_mtls_client_key_dest ~ ':' ~ agent_container_client_key_path ~ ':ro')] }}
+  when: agent_client_cert_provided | bool
+
+# ⚠️ АРХИТЕКТУРНЫЙ РАЗРЫВ, НАЙДЕННЫЙ при написании пошагового деплоя на два
+# VDS (не был учтён при первом написании этой роли): agent/docker_manager.py
+# управляет соседним контейнером Xray-core через Docker Engine API
+# (`docker.from_env()`) — Agent'у ВНУТРИ его собственного контейнера нужен
+# доступ к Docker. Более ранний слайс (см. docker_manager.py, докстринг
+# модуля) явно решил НЕ контейнеризовать Agent именно затем, чтобы не
+# монтировать хостовый Docker-сокет в контейнер ("the specific risk TZ-4
+# §5.4 calls out") — но эта роль его как раз контейнеризует. Прямой
+# bind-mount `/var/run/docker.sock` решил бы задачу, но давал бы
+# скомпрометированному Agent-контейнеру root-эквивалентный доступ ко ВСЕМУ
+# хосту, а не только к управлению одним контейнером Xray — рассмотрено и
+# отклонено; правильный принцип здесь "у процесса должны быть минимальные
+# права", а не "контейнер vs хост напрямую" (тот же риск был бы и без
+# контейнеризации Agent'а, если сам процесс имеет прямой доступ к сокету).
+#
+# Решение: docker-socket-proxy (Tecnativa, HAProxy-based, активно
+# поддерживаемый, стандартный паттерн для "дать контейнеру ограниченный
+# Docker API без полного сокета" — github.com/Tecnativa/docker-socket-proxy)
+# как сайдкар. Реальный `/var/run/docker.sock` смонтирован ТОЛЬКО в прокси
+# (read-only), не в Agent. Прокси разрешает только CONTAINERS+IMAGES+POST
+# (создание/старт/инспект контейнеров и pull образов) — ни EXEC, ни VOLUMES,
+# ни NETWORKS, ни SWARM, ни SECRETS, ни остальные категории API не разрешены
+# (Tecnativa deny-by-default: всё, что не выставлено в "1", запрещено).
+# Agent обращается к прокси по имени контейнера через приватную Docker-сеть,
+# без публикации портов на хост. docker-py's `docker.from_env()`
+# (docker_manager.py) нативно читает переменную окружения `DOCKER_HOST` —
+# изменений в коде Agent'а не потребовалось, только эта роль.
+# Честная оговорка: прокси разрешает CONTAINERS не только для конкретного
+# xray_container_name, а для ЛЮБОГО контейнера на хосте (Tecnativa не умеет
+# ACL по имени контейнера "из коробки") — то есть компрометированный Agent
+# всё ещё может создать/запустить/остановить произвольный контейнер (не
+# затронув volumes/networks/secrets/exec других контейнеров), а не только
+# управляемый им Xray. Существенно у́же прямого доступа к сокету, но не
+# идеальная изоляция «только этот контейнер» — задокументировано, не скрыто.
+- name: Создать приватную Docker-сеть для Agent↔docker-socket-proxy
+  community.docker.docker_network:
+    name: "{{ agent_docker_proxy_network }}"
+    internal: true # ни один из двух контейнеров в этой сети не получает выход в интернет через неё
+
+- name: Запустить docker-socket-proxy (единственный держатель реального docker.sock)
+  community.docker.docker_container:
+    name: "{{ agent_docker_proxy_container_name }}"
+    image: "{{ agent_docker_proxy_image }}"
+    state: started
+    restart_policy: "{{ agent_restart_policy }}"
+    networks:
+      - name: "{{ agent_docker_proxy_network }}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    env:
+      CONTAINERS: "1"
+      IMAGES: "1"
+      POST: "1"
+      # Всё остальное (EXEC, VOLUMES, NETWORKS, SWARM, SECRETS, SERVICES,
+      # NODES, PLUGINS, SYSTEM, AUTH, BUILD, COMMIT, CONFIGS, DISTRIBUTION,
+      # EVENTS, INFO, TASKS...) намеренно не выставлено — deny-by-default.
+
+- name: Собрать список Docker-сетей для контейнера Agent'а
+  ansible.builtin.set_fact:
+    agent_container_networks:
+      - name: "{{ agent_docker_proxy_network }}"
+
+# env передаётся через Docker Engine API (community.docker.docker_container
+# использует docker-py, не шеллит `docker run -e ...`), так что токен/адрес
+# никогда не попадают в аргументы процесса на хосте (`ps aux` их не
+# покажет) и не в shell-историю — ТЗ-7 §5 требование выполнено на этом
+# уровне. Честная оговорка (см. README за развёрнутым обсуждением): это НЕ
+# скрывает значения от `docker inspect dist-vpn-agent` — Docker хранит
+# резолвнутые env-переменные контейнера в открытом виде в своих метаданных
+# независимо от того, как их передали (-e, --env-file или API), это
+# ограничение самого Docker, а не конкретного выбора модуля здесь. Доступ к
+# docker inspect уже ограничен тем же доверенным периметром, что и доступ к
+# самому хосту (root, provision_user из группы docker), так что это не
+# новая поверхность атаки, но и не полная защита секрета в состоянии покоя.
+- name: Запустить контейнер Agent'а
+  community.docker.docker_container:
+    name: "{{ agent_container_name }}"
+    image: "{{ agent_effective_image }}"
+    state: started
+    restart_policy: "{{ agent_restart_policy }}"
+    volumes: "{{ agent_container_volumes | default([]) }}"
+    networks: "{{ agent_container_networks | default([]) }}"
+    env:
+      AGENT_PLATFORM_ADDRESS: "{{ agent_platform_address }}"
+      AGENT_ENROLLMENT_TOKEN: "{{ agent_enrollment_token }}"
+      AGENT_HOSTNAME: "{{ inventory_hostname }}"
+      AGENT_REQUESTED_ROLE: "{{ agent_requested_role }}"
+      AGENT_HEARTBEAT_INTERVAL_SECONDS: "{{ agent_heartbeat_interval_seconds | string }}"
+      AGENT_LOG_LEVEL: "{{ agent_log_level }}"
+      AGENT_INSECURE_DEV_MODE: "{{ agent_insecure_dev_mode | string | lower }}"
+      AGENT_MTLS_CA_CERT_PATH: "{{ agent_container_ca_path if not agent_insecure_dev_mode else '' }}"
+      AGENT_MTLS_CLIENT_CERT_PATH: "{{ agent_container_client_cert_path if agent_client_cert_provided else '' }}"
+      AGENT_MTLS_CLIENT_KEY_PATH: "{{ agent_container_client_key_path if agent_client_cert_provided else '' }}"
+      # docker-py's docker.from_env() (docker_manager.py) reads this natively - no
+      # Agent code change needed. Points at the scoped proxy, never the real socket.
+      DOCKER_HOST: "tcp://{{ agent_docker_proxy_container_name }}:2375"
+  no_log: true

@@ -1,0 +1,13 @@
+---
+- name: Убедиться, что ОС — Debian/Ubuntu (эта роль поддерживает только эту семью)
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'Debian'
+    fail_msg: >-
+      roles/base_hardening поддерживает только Debian/Ubuntu
+      (ansible_facts.os_family == 'Debian'). Обнаружено:
+      {{ ansible_facts['os_family'] }} / {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }}.
+    success_msg: >-
+      ОС поддерживается: {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }}

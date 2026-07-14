@@ -1,0 +1,54 @@
+---
+# См. group_vars/entry_nodes.yml — тот же механизм, роль "entry".
+role: exit
+
+# Роль-специфичные allow-правила ufw для выходных (Hop B) нод — ТЗ-7 §3.2/§4.2.
+#
+# ⚠️ Обновлено (найдено при написании пошагового деплоя на два VDS): раньше
+# этот список был намеренно пуст, потому что backhaul-транспорт Hop A<->Hop B
+# был pluggable-выбором между VLESS+REALITY chaining и AmneziaWG (см. ТЗ-4
+# §6, "решение — на этапе реализации") и protocol/порт нигде не были
+# зафиксированы. Это больше не открытый вопрос — Platform-сторона
+# (platform/src/dist_vpn_platform/services/xray_templates.py,
+# `build_hopb_inbound_json`/`HOP_LISTEN_PORT`) уже реально реализует Hop B
+# как variant (а), VLESS+REALITY chaining, на tcp/443, той же логикой
+# маскировки под HTTPS, что и у Hop A (см. group_vars/entry_nodes.yml) — но
+# на ДРУГОЙ ноде (эта, exit), отдельным правилом, не переиспользованием
+# записи entry. Вывод выведен из факта существующей реализации, а не заново
+# выдуман здесь.
+role_firewall_rules:
+  exit:
+    - port: 443
+      proto: tcp
+      comment: "Hop B backhaul inbound (VLESS+REALITY chaining from the entry node) — platform/xray_templates.py HOP_LISTEN_PORT"
+
+# --- Почему порт mTLS control-plane канала Agent<->Platform НЕ входит в
+# role_firewall_rules ни здесь, ни в group_vars/entry_nodes.yml ---
+#
+# ТЗ-7 §3.2 упоминает "порт mTLS-канала Agent↔Platform" в списке того, что
+# роль должна открывать — но фактическая архитектура делает inbound-правило
+# для него не нужным ни на entry, ни на exit ноде:
+#
+#   - TZ-4 §5.1 прямо: "Agent не принимает входящих соединений для
+#     control-plane" — модель dial-out/reverse-tunnel (по образцу Teleport,
+#     см. ту же секцию): Agent САМ инициирует и держит открытым исходящее
+#     соединение к Platform, Platform никогда не открывает соединение к
+#     Agent'у первой.
+#   - Это подтверждается и на уровне уже реализованного кода Agent'а (ветка
+#     agent/grpc-client-skeleton): agent/src/dist_vpn_agent/config.py,
+#     поле `platform_address` — адрес, КУДА Agent подключается исходящим
+#     соединением (default "localhost:50051" для dev), а не порт, который
+#     Agent слушает. Agent нигде не биндит серверный TCP/gRPC-сокет для
+#     Platform.
+#   - roles/base_hardening/tasks/firewall.yml уже разрешает ВЕСЬ outgoing
+#     трафик по умолчанию ("Политика по умолчанию: allow outgoing") — то
+#     есть исходящее соединение Agent'а к Platform уже ничем не блокируется
+#     без единой дополнительной строки.
+#
+# Итог: инициатор соединения (Agent) ничего не слушает и не нуждается во
+# входящем allow-правиле; получатель (Platform) — не в периметре этого
+# провижининга (Platform — отдельный компонент/хост, вне scope ТЗ-7).
+# Добавление сюда "allow-правила для mTLS-порта" было бы разрешением
+# ВХОДЯЩИХ соединений туда, где по архитектуре их никогда не бывает — то
+# есть было бы тем самым "портом на всякий случай", который ТЗ-7 §3.2
+# запрещает.

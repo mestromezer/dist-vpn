@@ -1,0 +1,9 @@
+---
+extends: default
+rules:
+  # Комментарии на русском часто длиннее 80 символов — не считаем это дефектом.
+  line-length: disable
+  # Ansible использует "yes"/"no" в шаблонах sshd_config (не в самом YAML) —
+  # но некоторые роли по традиции пишут булевы значения как yes/no в vars.
+  truthy:
+    allowed-values: ["true", "false", "yes", "no"]

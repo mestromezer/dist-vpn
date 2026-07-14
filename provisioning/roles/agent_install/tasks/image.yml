@@ -1,0 +1,95 @@
+---
+# --- build_from_source (по умолчанию) ---
+# См. README, "Agent: сборка образа — откуда и почему", за полным
+# обоснованием выбора build_from_source как режима по умолчанию.
+
+- name: Установить git (нужен для клонирования репозитория при build_from_source)
+  ansible.builtin.apt:
+    name: git
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: agent_image_source == 'build_from_source'
+
+# depth: 1 — известная оговорка: если agent_source_git_ref окажется "голым"
+# commit SHA (не тегом/веткой), а git-сервер не поддерживает shallow-fetch
+# произвольного SHA (не все серверы включают
+# uploadpack.allowReachableSHA1InWant) — эта задача может упасть. Теги
+# обычно работают без проблем (это advertised ref). Если это станет
+# проблемой на практике — убрать depth (полный clone) как надёжный fallback.
+- name: "Клонировать репозиторий (закреплённая версия {{ agent_source_git_ref }}) на целевой хост"
+  ansible.builtin.git:
+    repo: "{{ agent_source_git_repo }}"
+    dest: "{{ agent_source_checkout_dir }}"
+    version: "{{ agent_source_git_ref }}"
+    force: true
+    depth: 1
+  when: agent_image_source == 'build_from_source'
+
+# Честная, конкретная проверка вместо непонятной ошибки docker build:
+# ЧЕСТНАЯ НАХОДКА этого слайса — agent/Dockerfile на момент написания этой
+# роли существует ТОЛЬКО на ветке agent/grpc-client-skeleton (и в любом
+# коммите/теге, куда она уже смержена) — сама эта ветка
+# (provisioning/base-hardening-role) на текущий HEAD его не содержит,
+# agent/ здесь пока только TZ-стаб README. Явная проверка здесь конвертирует
+# "docker build падает с непонятной ошибкой про несуществующий Dockerfile"
+# в понятное сообщение оператору.
+- name: Проверить, что закреплённая версия исходников содержит agent/Dockerfile
+  ansible.builtin.stat:
+    path: "{{ agent_source_checkout_dir }}/agent/Dockerfile"
+  register: agent_dockerfile_stat
+  when: agent_image_source == 'build_from_source'
+
+- name: "Preflight: agent/Dockerfile присутствует в закреплённой версии"
+  ansible.builtin.assert:
+    that:
+      - agent_dockerfile_stat.stat.exists
+    fail_msg: >-
+      agent/Dockerfile не найден в {{ agent_source_checkout_dir }} на
+      {{ agent_source_git_ref }}. На момент написания этой роли
+      agent/Dockerfile существует только на ветке
+      agent/grpc-client-skeleton (и там, куда она уже смержена) — ветка
+      provisioning/base-hardening-role сама по себе его не содержит.
+      Укажите agent_source_git_ref, указывающий на версию репозитория, где
+      agent/Dockerfile уже есть.
+  when: agent_image_source == 'build_from_source'
+
+# Контекст сборки — КОРЕНЬ клонированного репозитория, не agent_source_checkout_dir/agent
+# — см. agent/Dockerfile (комментарий вверху файла): образу нужен доступ к
+# contracts/proto/agent_control.proto, который лежит вне agent/, а Docker
+# не умеет COPY за пределы своего контекста. Именно поэтому эта роль
+# клонирует ВЕСЬ репозиторий на хост, а не копирует только каталог agent/.
+- name: "Собрать Docker-образ Agent'а из agent/Dockerfile (контекст — корень репозитория)"
+  community.docker.docker_image:
+    name: "{{ agent_image_tag }}"
+    source: build
+    build:
+      path: "{{ agent_source_checkout_dir }}"
+      dockerfile: agent/Dockerfile
+      pull: false
+    state: present
+  when: agent_image_source == 'build_from_source'
+
+- name: "Диагностика: образ Agent'а собран локально"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] Образ {{ agent_image_tag }} собран локально
+      из {{ agent_source_git_repo }}@{{ agent_source_git_ref }}
+      ({{ agent_source_checkout_dir }}/agent/Dockerfile).
+  when: agent_image_source == 'build_from_source'
+
+# --- registry (альтернатива, см. README за тем, почему это не режим по умолчанию) ---
+
+- name: "Скачать образ Agent'а из реестра"
+  community.docker.docker_image:
+    name: "{{ agent_registry_image }}"
+    source: pull
+  when: agent_image_source == 'registry'
+
+- name: "Диагностика: используется образ из реестра"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] agent_image_source=registry —
+      {{ agent_registry_image }} скачан. Аутентификация в реестр, если
+      нужна (docker_login и т.п.), — вне рамок этой роли в этом слайсе.
+  when: agent_image_source == 'registry'

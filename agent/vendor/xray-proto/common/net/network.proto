@@ -1,0 +1,24 @@
+// Vendored, unmodified, from https://github.com/XTLS/Xray-core, path `common/net/network.proto`,
+// tag v26.7.11 (commit 50231eaff98ccc31b5cbd247a721c16e97fe5ec1). See ../../README.md in this vendor
+// directory for why this file is here and the full file list/rationale.
+// Do not hand-edit -- re-run agent/scripts/gen_proto.sh's vendor-refresh
+// step (see that script) to update from upstream instead.
+
+syntax = "proto3";
+
+package xray.common.net;
+option csharp_namespace = "Xray.Common.Net";
+option go_package = "github.com/xtls/xray-core/common/net";
+option java_package = "com.xray.common.net";
+option java_multiple_files = true;
+
+enum Network {
+  Unknown = 0;
+
+  TCP = 2;
+  UDP = 3;
+  UNIX = 4;
+}
+
+// NetworkList is a list of Networks.
+message NetworkList { repeated Network network = 1; }

@@ -1,0 +1,40 @@
+## {{ ansible_managed }}
+## Источник: roles/base_hardening (ТЗ-7 §3.1). Не редактировать вручную —
+## будет перезаписано при следующем прогоне playbook'а.
+##
+## Загружается через "Include /etc/ssh/sshd_config.d/*.conf" в самом начале
+## /etc/ssh/sshd_config (порядок обеспечивается roles/base_hardening/tasks/
+## ssh.yml). sshd применяет "первое совпадение побеждает" для большинства
+## директив — поэтому значения из этого drop-in'а имеют приоритет над любыми
+## конфликтующими директивами дальше в основном файле.
+
+Port {{ ssh_port }}
+
+# Только sudo-пользователь, без прямого root-доступа по SSH (ТЗ-7 §3.1).
+PermitRootLogin {{ ssh_permit_root_login }}
+
+# Только аутентификация по ключу.
+PasswordAuthentication {{ ssh_password_authentication }}
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+
+# Ограничение попыток на одно соединение.
+MaxAuthTries {{ ssh_max_auth_tries }}
+
+# Не нужен GUI на VDS-ноде пула.
+X11Forwarding no
+{% if ssh_allow_groups %}
+
+# Явное ограничение круга допущенных групп (ТЗ-7 §3.1, опционально).
+AllowGroups {{ ssh_allow_groups | join(' ') }}
+{% endif %}
+{% if ssh_allow_users %}
+
+# Явное ограничение круга допущенных пользователей (ТЗ-7 §3.1, опционально).
+AllowUsers {{ ssh_allow_users | join(' ') }}
+{% endif %}
+
+# Актуальный список Mozilla OpenSSH Guidelines — приоритет AEAD-алгоритмам.
+Ciphers {{ ssh_ciphers | join(',') }}
+MACs {{ ssh_macs | join(',') }}
+KexAlgorithms {{ ssh_kex_algorithms | join(',') }}

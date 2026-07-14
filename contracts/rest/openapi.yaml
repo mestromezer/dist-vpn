@@ -167,6 +167,7 @@ paths:
               properties:
                 role: { $ref: "#/components/schemas/NodeRole" }
                 label: { type: string }
+                public_address: { type: string }
       responses:
         "200":
           content:
@@ -176,6 +177,29 @@ paths:
       summary: Вывести ноду из эксплуатации (DECOMMISSIONED) — см. TZ-5 §4.1
       responses:
         "202": { description: "Принято, переконфигурация связанных каскадов запущена асинхронно" }
+
+  /nodes/{node_id}/resource-samples:
+    # Добавлено после реализации Platform (тот же паттерн, что и /auth/change-password
+    # выше) — временной ряд cpu/mem/disk vs. количество пользователей/устройств для
+    # анализа затрат ресурсов, один сэмпл на каждый Heartbeat. Раньше Node хранил
+    # только последнее значение — истории не было вообще.
+    parameters:
+      - { name: node_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Временной ряд использования ресурсов ноды и количества пользователей/устройств
+      parameters:
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 100 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/NodeResourceSample" } }
+                  total: { type: integer }
 
   /cascades:
     get:
@@ -227,6 +251,36 @@ paths:
       summary: Разобрать каскад
       responses:
         "204": { description: OK }
+
+  /cascades/{cascade_id}/migrate-users:
+    # Добавлено после реализации Platform (тот же паттерн, что и /auth/change-password
+    # выше) - админ-часть failover (ТЗ-5 §4.3 "перенаправлять подключения при обрыве
+    # на доступные сервера"): автодетект по таймауту heartbeat (services/
+    # health_scheduler.py) помечает связку DOWN, а сам выбор связки-замены и
+    # переключение — явное действие администратора, не автоматика.
+    parameters:
+      - { name: cascade_id, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Перенести всех пользователей этой связки на другую (переключение при обрыве)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_cascade_id]
+              properties:
+                to_cascade_id: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cascade_id: { type: string }
+                  to_cascade_id: { type: string }
+                  migrated_user_count: { type: integer }
 
   /cascades/{cascade_id}/events:
     parameters:
@@ -334,10 +388,70 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
+    patch:
+      # Добавлено после реализации Platform (тот же паттерн, что и PATCH /nodes/{id}
+      # выше) - ограничение количества устройств на пользователя (ТЗ-5 §4.4) требует
+      # способа это ограничение задать/изменить админом.
+      summary: Изменить max_devices пользователя (явный null = без ограничения)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                max_devices: { type: integer, nullable: true }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
     delete:
       summary: Отозвать доступ пользователя (см. TZ-5 §4.4)
       responses:
         "204": { description: OK }
+
+  /users/{user_id}/device-events:
+    # Добавлено после реализации Platform - журнал принудительных реконнектов при
+    # превышении max_devices (см. Platform-README "Отклонения от ТЗ").
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: История срабатываний лимита устройств для пользователя
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 25 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/UserDeviceKickEvent" } }
+                  total: { type: integer }
+
+  /users/{user_id}/connection/{cascade_id}:
+    # Добавлено после реализации Platform (тот же паттерн, что и /auth/change-password
+    # выше) - ТЗ-5 §4.4/§9 требует, чтобы связка реально заработала для клиента, а
+    # без готовой vless:// ссылки ни один шаг ТЗ не проверяем end-to-end: до этого
+    # POST /users отдавал только uuid, а Hop A REALITY-инбаунд собирался с пустым
+    # приватным ключом (см. platform/README.md "Отклонения от ТЗ") - оба пробела
+    # закрыты вместе в этом слайсе.
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: string } }
+      - { name: cascade_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: >-
+        Готовая vless:// ссылка для импорта в клиент (REALITY, Hop A этой связки).
+        400, если у entry-ноды каскада не задан public_address (PATCH /nodes/{node_id}).
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  vless_uri: { type: string }
 
   /usage:
     get:
@@ -396,6 +510,16 @@ components:
         status: { $ref: "#/components/schemas/NodeStatus" }
         agent_version: { type: string }
         last_heartbeat_at: { type: string, format: date-time }
+        public_address:
+          type: string
+          description: >-
+            Публичный адрес (IP или DNS-имя), по которому клиент должен подключаться,
+            если эта нода — entry. Добавлено после реализации Platform (изначально
+            поле было только в реализации, не в контракте, тот же паттерн, что и
+            TokenPair.must_change_password выше) — админ-задаваемое через PATCH
+            /nodes/{node_id}, никогда не выводится из Node.hostname (тот
+            self-reported агентом при enrollment и не обязательно совпадает с
+            публичным адресом).
 
     CascadeInput:
       type: object
@@ -417,6 +541,16 @@ components:
         exit_node_ids: { type: array, items: { type: string } }
         status: { $ref: "#/components/schemas/CascadeStatus" }
         hop_a_presets: { type: array, items: { type: string } }
+        hopa_reality_public_key:
+          type: string
+          description: >-
+            Публичный REALITY-ключ Hop A (клиентского) инбаунда этой связки — только
+            публичная часть, приватный ключ никогда не покидает Platform. Добавлено
+            после реализации Platform, тот же паттерн, что и Node.public_address выше.
+            Нужен вместе с hopa_reality_short_id для сборки vless:// (см. GET
+            /users/{user_id}/connection/{cascade_id}).
+        hopa_reality_short_id:
+          type: string
 
     HealthEvent:
       type: object
@@ -451,8 +585,45 @@ components:
         name: { type: string }
         uuid: { type: string, description: "Личный VLESS-идентификатор пользователя, не меняется при ротации сервера" }
         cascade_ids: { type: array, items: { type: string } }
+        max_devices:
+          type: integer
+          nullable: true
+          description: >-
+            Максимум одновременно подключённых устройств (по онлайн-IP из Xray
+            StatsService, см. TelemetryReport.user_online в agent_control.proto).
+            null = без ограничения. Добавлено после реализации Platform, см.
+            "Отклонения от ТЗ" — при превышении Platform принудительно
+            переподключает все устройства (RemoveUser+AddUser) и пишет
+            UserDeviceKickEvent.
+        last_online_device_count:
+          type: integer
+          description: "Кэш из последнего TelemetryReport с этим пользователем — не гарантированно свежее значение."
+        last_online_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
         revoked_at: { type: string, format: date-time, nullable: true }
+
+    UserDeviceKickEvent:
+      type: object
+      description: "Аудит принудительных переподключений при превышении User.max_devices."
+      properties:
+        id: { type: string }
+        node_id: { type: string }
+        online_ip_count: { type: integer }
+        max_devices: { type: integer }
+        kicked_at: { type: string, format: date-time }
+
+    NodeResourceSample:
+      type: object
+      description: "Один сэмпл на Heartbeat — временной ряд, в отличие от Node.cpu_percent/etc., хранящих только последнее значение."
+      properties:
+        id: { type: string }
+        sampled_at: { type: string, format: date-time }
+        cpu_percent: { type: number }
+        mem_percent: { type: number }
+        disk_percent: { type: number }
+        provisioned_user_count: { type: integer, description: "Кол-во пользователей с доступом к каскадам этой ноды (запрос к БД)" }
+        online_user_count: { type: integer, description: "Кол-во пользователей, реально онлайн по последней телеметрии" }
+        online_device_count: { type: integer, description: "Суммарное кол-во онлайн-устройств по последней телеметрии" }
 
     UsageStat:
       type: object
