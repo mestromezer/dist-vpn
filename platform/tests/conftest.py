@@ -75,7 +75,10 @@ def _reset_rate_limiter() -> None:
 
 @pytest_asyncio.fixture
 async def app(db_engine: None):
-    return create_app(run_startup_checks=False)
+    # run_background_tasks=False - a periodic health-scheduler task has no place
+    # running unattended across dozens of short-lived per-test event loops; see
+    # tests/test_health_scheduler.py, which calls check_node_timeouts() directly.
+    return create_app(run_startup_checks=False, run_background_tasks=False)
 
 
 @pytest_asyncio.fixture

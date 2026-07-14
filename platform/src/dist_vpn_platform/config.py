@@ -59,6 +59,18 @@ class Settings(BaseSettings):
     # --- Enrollment tokens (TZ-5 §4.1 / §6.2) ---
     enrollment_token_ttl_minutes: int = 30
 
+    # --- Health scheduler (TZ-5 §4.3 - auto-detect DOWN by heartbeat timeout) ---
+    # services/health_scheduler.py. 45s = 3x the Agent's own default
+    # heartbeat_interval_seconds (15s, agent/src/dist_vpn_agent/config.py) - a "missed
+    # 3 consecutive heartbeats" pattern, not itself specified by any TZ. If an Agent's
+    # own heartbeat_interval_seconds is overridden away from the default, this should
+    # be tuned to match - the two aren't coupled/validated against each other.
+    node_heartbeat_timeout_seconds: int = 45
+    # How often the scheduler re-checks for newly-stale nodes - independent of the
+    # timeout above (a shorter interval just means faster detection within the
+    # timeout window, not a shorter timeout itself).
+    health_scheduler_interval_seconds: int = 10
+
     # --- mTLS CA (TZ-5 §6.2 - see security/mtls_ca.py for the full design note) ---
     # Persistent volume for the CA keypair/cert + server leaf keypair/cert. Local/non-
     # Docker dev: relative to the working directory. docker-compose.yml overrides this
