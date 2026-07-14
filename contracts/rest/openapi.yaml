@@ -252,6 +252,36 @@ paths:
       responses:
         "204": { description: OK }
 
+  /cascades/{cascade_id}/migrate-users:
+    # Добавлено после реализации Platform (тот же паттерн, что и /auth/change-password
+    # выше) - админ-часть failover (ТЗ-5 §4.3 "перенаправлять подключения при обрыве
+    # на доступные сервера"): автодетект по таймауту heartbeat (services/
+    # health_scheduler.py) помечает связку DOWN, а сам выбор связки-замены и
+    # переключение — явное действие администратора, не автоматика.
+    parameters:
+      - { name: cascade_id, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Перенести всех пользователей этой связки на другую (переключение при обрыве)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_cascade_id]
+              properties:
+                to_cascade_id: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cascade_id: { type: string }
+                  to_cascade_id: { type: string }
+                  migrated_user_count: { type: integer }
+
   /cascades/{cascade_id}/events:
     parameters:
       - { name: cascade_id, in: path, required: true, schema: { type: string } }
