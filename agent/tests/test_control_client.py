@@ -26,7 +26,7 @@ from dist_vpn_agent.config import AgentSettings, NodeRole
 from dist_vpn_agent.control_client import ControlClient, EnrollmentRejected
 from dist_vpn_agent.docker_manager import XrayContainerHealth
 from dist_vpn_agent.generated import agent_control_pb2 as pb2
-from dist_vpn_agent.xray_client import XrayClient
+from dist_vpn_agent.xray_client import UserStats, XrayClient, XrayClientError
 from mock_platform_server import MockAgentControlServicer, running
 from mock_xray_server import MockHandlerServicer
 from mock_xray_server import running as xray_running
@@ -578,3 +578,96 @@ async def test_build_channel_prefers_persisted_identity_over_configured_paths(tm
     assert captured_kwargs["certificate_chain"] == b"CONFIGURED-CERT-should-not-be-used"
 
     assert client.node_id is None
+
+
+# --- Host resource sampling (_sample_host_resources) and telemetry building --------
+#
+# cpu_percent/mem_percent/disk_percent were a hardcoded (0.0, 0.0, 0.0) placeholder
+# until this slice; TelemetryReport was never built or sent from anywhere at all.
+
+
+class _FakeXrayClientForStats:
+    """Duck-typed stand-in for XrayClient exposing only get_users_stats() -
+    ControlClient's telemetry path never calls any other XrayClient method, so a
+    full mock gRPC server (mock_xray_server.py, used elsewhere in this file for the
+    Command-dispatch tests) would be unnecessary machinery for these two tests."""
+
+    def __init__(self, stats: list[UserStats] | None = None, error: Exception | None = None) -> None:
+        self._stats = stats or []
+        self._error = error
+
+    async def get_users_stats(self) -> list[UserStats]:
+        if self._error is not None:
+            raise self._error
+        return self._stats
+
+
+def test_sample_host_resources_returns_real_nonzero_values():
+    client = ControlClient(make_settings("unused:50051"), docker_manager=_FakeDockerManager())
+
+    # cpu_percent(interval=None) always returns 0.0 on the very first call in a
+    # process's life (see _sample_host_resources's own docstring) - call it once
+    # to get past that before asserting, exactly as a real long-running Agent
+    # process would across its first two heartbeats.
+    client._sample_host_resources()
+    cpu, mem, disk = client._sample_host_resources()
+
+    assert mem > 0.0  # a real host/container always has *some* memory in use
+    assert disk > 0.0  # a real filesystem is never reported as literally empty
+    assert cpu >= 0.0  # legitimately can be 0.0 on an idle test machine
+
+
+@pytest.mark.asyncio
+async def test_build_telemetry_message_reports_traffic_and_online_devices():
+    settings = make_settings("unused:50051")
+    xray_client = _FakeXrayClientForStats(
+        stats=[
+            UserStats(email="alice@example.com", online_ips=["1.2.3.4", "5.6.7.8"], uplink_bytes=100, downlink_bytes=200),
+            UserStats(email="bob@example.com", online_ips=[], uplink_bytes=0, downlink_bytes=0),
+        ]
+    )
+    client = ControlClient(settings, xray_client=xray_client, docker_manager=_FakeDockerManager())
+    client.node_id = "node-telemetry-test"
+
+    message = await client._build_telemetry_message()
+
+    assert message is not None
+    report = message.telemetry
+    assert report.node_id == "node-telemetry-test"
+    # bob has zero traffic and zero online IPs - correctly excluded from both
+    # lists rather than sent as dead weight (see _build_telemetry_message).
+    assert len(report.counters) == 1
+    assert report.counters[0].scope == "user"
+    assert report.counters[0].key == "alice@example.com"
+    assert report.counters[0].uplink_bytes == 100
+    assert report.counters[0].downlink_bytes == 200
+    assert len(report.user_online) == 1
+    assert report.user_online[0].email == "alice@example.com"
+    assert list(report.user_online[0].online_ips) == ["1.2.3.4", "5.6.7.8"]
+
+
+@pytest.mark.asyncio
+async def test_build_telemetry_message_returns_none_when_nothing_to_report():
+    settings = make_settings("unused:50051")
+    xray_client = _FakeXrayClientForStats(stats=[])
+    client = ControlClient(settings, xray_client=xray_client, docker_manager=_FakeDockerManager())
+    client.node_id = "node-telemetry-empty"
+
+    message = await client._build_telemetry_message()
+
+    assert message is None
+
+
+@pytest.mark.asyncio
+async def test_build_telemetry_message_returns_none_on_xray_error_without_raising():
+    """A local Xray-core StatsService hiccup must not crash the heartbeat loop -
+    same "don't lose the whole control-plane session over one bad stat read"
+    reasoning as the Docker-health handling in _build_heartbeat_message."""
+    settings = make_settings("unused:50051")
+    xray_client = _FakeXrayClientForStats(error=XrayClientError("Xray StatsService.GetAllOnlineUsers failed: boom"))
+    client = ControlClient(settings, xray_client=xray_client, docker_manager=_FakeDockerManager())
+    client.node_id = "node-telemetry-error"
+
+    message = await client._build_telemetry_message()
+
+    assert message is None

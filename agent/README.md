@@ -152,6 +152,7 @@ bash scripts/gen_proto.sh
 | `AGENT_XRAY_DOCKER_IMAGE` | `ghcr.io/xtls/xray-core:latest` | Образ (с тегом), из которого `docker_manager.py` создаёт/запускает контейнер Xray-core |
 | `AGENT_XRAY_CONTAINER_NAME` | `dist-vpn-xray-core` | Имя управляемого контейнера — `docker_manager.py` трогает **только** контейнер с этим именем (TZ-4 §5.4) |
 | `AGENT_XRAY_CONFIG_HOST_PATH` | `/etc/dist-vpn/xray-config.json` | Путь на хосте, монтируемый read-only в контейнер как `/etc/xray/config.json` |
+| `AGENT_XRAY_PUBLIC_PORT` | `443` | Публикуемый на `0.0.0.0` порт для реального клиентского/backhaul VLESS-трафика (Hop A/Hop B). **Найдено при написании пошагового деплоя на два VDS**: `AGENT_XRAY_API_ADDRESS` выше публикуется при создании контейнера, но Hop A/Hop B инбаунды добавляются позже, уже после старта контейнера, через `AddInbound` — а Docker не умеет добавить проброс порта уже работающему контейнеру. Без этой переменной реальный VLESS-трафик просто не мог физически дойти до контейнера, даже с рабочими REALITY-ключами и корректным `port`/`listen` в самом инбаунде (см. `docker_manager.py`). Должен совпадать с `HOP_LISTEN_PORT` на стороне Platform (`platform/src/dist_vpn_platform/services/xray_templates.py`) — сейчас это согласование только по конвенции, не проверяется автоматически ни одной из сторон |
 | `AGENT_LOG_LEVEL` | `INFO` | Уровень логирования |
 
 ### mTLS и bootstrap-нюанс
@@ -440,6 +441,52 @@ xray-core:latest` уже был локально) — **все пять** `TestO
 собственный контролируемый HTTP-эхо-сервис вместо публичных `example.com`/
 `neverssl.com`, не сделано в этом срезе.
 
+## Телеметрия: `get_users_stats()` и почему это три RPC, а не один
+
+`xray_client.py::get_users_stats()` собирает per-user байтовые счётчики и
+список онлайн-IP-адресов для каждого пользователя — используется
+`control_client.py`'s heartbeat-циклом для реального `TelemetryReport`
+(`counters` + новое поле `user_online`, TZ-4 §3.5, TZ-5 §4.4 "ограничение
+устройств на пользователя").
+
+**Почему не `StatsService.GetUsersStats`** (единственный вызов, который
+отдал бы и трафик, и онлайн-IP разом — именно так задокументирован в
+вендоренном `agent/vendor/xray-proto/app/stats/command/command.proto`,
+запиненном на тег Xray-core v26.7.11): эмпирически проверено против
+реального образа `ghcr.io/xtls/xray-core:latest` (`xray version` внутри
+контейнера показывает **26.3.27** — версию СТАРШЕ, чем запиненный тег
+proto-файла) — `GetUsersStats` отвечает `UNIMPLEMENTED`. Это реальный
+client/server version skew, а не гипотеза: проверено запуском настоящего
+контейнера, не чтением исходников. Рабочая на 26.3.27 комбинация (три
+RPC-вызова, не один):
+
+1. `GetAllOnlineUsers()` → список строк вида `"user>>>{email}>>>online"`
+   (полное имя стата, не голый email — парсится в `get_users_stats()`).
+2. `GetStatsOnlineIpList(name="user>>>{email}>>>online")` на каждого
+   онлайн-пользователя из п.1 → `{ip: last_seen_unix}`.
+3. `QueryStats(pattern="user>>>", reset=true)` → счётчики
+   `user>>>{email}>>>traffic>>>uplink`/`downlink` для **всех** когда-либо
+   видевших трафик пользователей (не только сейчас онлайн — оффлайн-
+   пользователь с реальной историей трафика тоже здесь появится, просто без
+   записи в `online_ips`).
+
+Всё это требует `policy.levels["0"].statsUserUplink`/`statsUserDownlink`/
+`statsUserOnline` — см. `xray_bootstrap.py` (сгенерированный базовый
+конфиг). **НЕ требует** включения `log.access` — сверено с официальной
+документацией (xtls.github.io/en/config/policy.html): `statsUserOnline`
+независим от access-логирования, приватность (TZ-4 §3.5) не нарушена.
+
+Реально протестировано (`tests/test_xray_client.py::
+test_real_xray_core_get_users_stats_with_real_traffic`) — не только против
+мока: второй настоящий Xray-core-контейнер как VLESS-клиент дозванивается
+до первого, гоняет реальный HTTP-запрос через туннель, и только после
+этого `get_users_stats()` проверяется на непустые `uplink_bytes`/
+`downlink_bytes`/`online_ips`. Этот тест сам по себе создаёт СВОЙ
+собственный сервер-контейнер (не переиспользует `real_xray_address` —
+общая фикстура публикует наружу только API-порт, а Docker не умеет
+добавить проброс порта уже запущенному контейнеру, так что динамически
+добавленный VLESS-инбаунд для второго контейнера был бы недостижим).
+
 ## Запуск локально
 
 ```bash
@@ -674,9 +721,29 @@ mTLS-идентичность (CSR + персист, см. выше) и `RunTest
   захардкоженный `False`: `control_client.py` спрашивает
   `docker_manager.health()` на каждый heartbeat (в отдельном потоке —
   `docker-py` синхронный, зависший Docker Engine API не должен стопорить
-  control-plane цикл). `cpu_percent`/`mem_percent`/`disk_percent`
-  по-прежнему заглушки (нужен отдельный выбор способа сэмплинга ресурсов
-  хоста, например `psutil` — не сделан в этом срезе).
+  control-plane цикл). **⚠️ Обновлено**: `cpu_percent`/`mem_percent`/
+  `disk_percent` теперь тоже реальные, через `psutil`
+  (`_sample_host_resources()`) — были захардкожены `0.0`, закрыто при
+  реализации ограничения устройств на пользователя (`GetAllOnlineUsers`/
+  `GetStatsOnlineIpList`), т.к. без реальных цифр ресурсный мониторинг на
+  стороне Platform был бы бессмысленным. Честная оговорка: `disk_usage("/")`
+  — это диск Agent-контейнера (его rootfs), не обязательно точная метрика
+  диска всего хоста VDS целиком.
+- **Телеметрия (`TelemetryReport`) теперь реально строится и отправляется**
+  каждый heartbeat-цикл (`_build_telemetry_message()`), не только
+  задекларирована в контракте — раньше `StatsService.QueryStats` был
+  реализован и покрыт тестами (`xray_client.py::query_stats`), но НИКТО его
+  не вызывал из control-plane кода, и `TelemetryReport` никогда не строился
+  и не отправлялся ни разу. Сейчас использует новый `get_users_stats()`
+  (см. "RunTest" секцию ниже за деталями трёхшагового RPC-фоллбэка
+  `GetAllOnlineUsers`+`GetStatsOnlineIpList`+`QueryStats` — `GetUsersStats`
+  из вендоренного proto оказался `UNIMPLEMENTED` на реально задеплоенной
+  версии Xray-core 26.3.27, хотя proto запинен на более позднюю v26.7.11),
+  заполняя и `counters` (байтовые счётчики, как раньше), и новое поле
+  `user_online` (email → список онлайн-IP, для лимита устройств на
+  Platform). Пользователи без трафика и без онлайн-IP в отчёт не попадают
+  (не шлём мёртвый вес). Ошибка локального Xray StatsService не роняет
+  control-plane цикл — просто пропускается этот цикл телеметрии, залогировано.
 - mTLS-канал по умолчанию (с осмысленным bootstrap-исключением для самого
   первого enrollment — см. выше), explicit insecure dev-режим только по
   явному флагу, с громким предупреждением.
@@ -735,16 +802,13 @@ mTLS-идентичность (CSR + персист, см. выше) и `RunTest
   Xray-management слоя. `xray_client.py` умеет добавить любой
   сконфигурированный inbound/outbound, но решение "как именно устроен
   Hop A↔Hop B backhaul и что в этом pluggable" не принято.
-- Телеметрия per-user/per-inbound счётчиков (TZ-4 §3.5) — без изменений в
-  этом под-срезе; `StatsService.QueryStats` уже реально работает
-  (`xray_client.py.query_stats`, используется тестами), но никакой
-  `Command` его не вызывает и `TelemetryReport` никуда не отправляется —
-  нужен отдельный периодический цикл сбора и отправки, не только
-  реактивный ответ на команды.
-- Сэмплинг реальных `cpu_percent`/`mem_percent`/`disk_percent` для
-  `Heartbeat.health` (сейчас `0.0` — заглушка) — без изменений в этом
-  под-срезе; нужен выбор способа сэмплинга (скорее всего `psutil`, не
-  добавлен как зависимость).
+- ~~Телеметрия per-user/per-inbound счётчиков (TZ-4 §3.5)~~ — реализована в
+  этом под-срезе, см. "Heartbeat.health..." выше. Per-inbound/per-outbound
+  scope (`UsageCounter.scope == "inbound"/"outbound"`) по-прежнему не
+  заполняется — только `scope == "user"`, это то, что реально нужно для
+  лимита устройств и usage-биллинга; per-inbound агрегация не запрашивалась.
+- ~~Сэмплинг реальных `cpu_percent`/`mem_percent`/`disk_percent`~~ —
+  реализован в этом под-срезе через `psutil`, см. "Heartbeat.health..." выше.
 - **`RunTest`'s `TLS_HANDSHAKE_FAILED`-эвристика имеет известный пробел**
   (найдено в этом под-срезе реальным тестированием, не гипотетически): на
   non-TLS outbound'е (например `freedom`) настоящий отказ TLS-сертификата

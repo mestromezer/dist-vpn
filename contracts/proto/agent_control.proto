@@ -75,6 +75,14 @@ message TelemetryReport {
   string node_id = 1;
   repeated UsageCounter counters = 2;
   int64 timestamp_unix = 3;
+  // Онлайн-устройства по пользователю (StatsService.GetAllOnlineUsers +
+  // GetStatsOnlineIpList на стороне Agent, см. agent/src/dist_vpn_agent/
+  // xray_client.py::get_users_stats) — нужно для ограничения количества
+  // устройств на пользователя (User.max_devices, Platform) и для расчёта
+  // online_user_count/online_device_count в NodeResourceSample. Аддитивное
+  // поле, тот же паттерн, что и csr_pem в Enrollment выше — не ломает уже
+  // задеплоенные стороны, которые его не знают.
+  repeated UserOnlineStat user_online = 4;
 }
 
 message UsageCounter {
@@ -82,6 +90,18 @@ message UsageCounter {
   string key = 2;   // email пользователя ИЛИ tag inbound/outbound
   uint64 uplink_bytes = 3;
   uint64 downlink_bytes = 4;
+}
+
+// IP-адреса, с которых пользователь сейчас реально подключён (по данным
+// Xray-core StatsService, "online" = активность в последние ~20 секунд —
+// собственная семантика Xray, не наше решение). НЕ требует включения
+// log.access (проверено по официальной документации Xray:
+// xtls.github.io/en/config/policy.html) — приватность (TZ-4 §3.5) не
+// затронута, это отдельный, специально для этого предназначенный механизм
+// StatsService, а не парсинг логов подключений.
+message UserOnlineStat {
+  string email = 1;
+  repeated string online_ips = 2;
 }
 
 message CommandResult {

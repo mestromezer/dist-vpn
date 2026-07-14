@@ -21,6 +21,7 @@ from dist_vpn_agent.config import AgentSettings
 from dist_vpn_agent.control_client import ControlClient
 from dist_vpn_agent.docker_manager import DockerManager, DockerManagerError
 from dist_vpn_agent.logging_setup import configure_logging
+from dist_vpn_agent.xray_bootstrap import ensure_base_config
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ def main() -> None:
         settings.requested_role.value,
         settings.heartbeat_interval_seconds,
     )
+
+    ensure_base_config(settings)
 
     docker_manager = DockerManager(settings)
     try:

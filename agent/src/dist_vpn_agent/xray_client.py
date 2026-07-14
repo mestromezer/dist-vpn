@@ -72,6 +72,7 @@ expanded) rather than silently assumed correct forever.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import ipaddress
 import json
 from collections.abc import AsyncIterator
@@ -443,10 +444,6 @@ class XrayClient:
             await stub.OverrideBalancerTarget(request)
 
     # -- StatsService -----------------------------------------------------------
-    #
-    # Wired up (real stub, real message types) but not called from anywhere
-    # yet -- no Command variant needs it this slice. Kept minimal and here
-    # for TelemetryReport (TZ-4 SS3.5), a follow-up slice; see agent/README.md.
 
     async def query_stats(self, pattern: str = "", reset: bool = False) -> list[tuple[str, int]]:
         stub = stats_pb2_grpc.StatsServiceStub(self._ensure_channel())
@@ -454,3 +451,91 @@ class XrayClient:
         async with _translate_grpc_errors("StatsService.QueryStats"):
             response = await stub.QueryStats(request)
         return [(stat.name, stat.value) for stat in response.stat]
+
+    async def get_users_stats(self) -> list["UserStats"]:
+        """Per-user traffic delta + currently-online IPs, via Xray-core's
+        StatsService. Requires the base config's ``policy.levels["0"]`` to have
+        ``statsUserUplink``/``statsUserDownlink``/``statsUserOnline`` all true - see
+        xray_bootstrap.py.
+
+        --- Why this is three RPC calls, not the one ``GetUsersStats`` call its own
+        vendored proto declares (see agent/vendor/xray-proto/app/stats/command/
+        command.proto, pinned to Xray-core tag v26.7.11) ---
+
+        Verified empirically against the real ``ghcr.io/xtls/xray-core:latest``
+        image (actual running version: 26.3.27, *older* than the vendored proto's
+        pinned tag): ``GetUsersStats`` returns ``UNIMPLEMENTED`` - it was added to
+        the proto schema in a later release than what the production image actually
+        runs, a real client/server version-skew, not a guess. Confirmed by actually
+        running a full loopback client->server VLESS connection through a real
+        container (not just an RPC probe against zero traffic) and observing which
+        calls succeed:
+
+          1. ``GetAllOnlineUsers`` -> ``["user>>>{email}>>>online", ...]`` (the FULL
+             stat name per online user, not a bare email - stripped below).
+          2. ``GetStatsOnlineIpList(name="user>>>{email}>>>online")`` per online user
+             -> ``{ips: {ip_string: last_seen_unix}}``.
+          3. ``QueryStats(pattern="user>>>")`` -> every ``user>>>{email}>>>traffic>>>
+             uplink``/``downlink`` counter, online or not (traffic is a persistent
+             counter independent of the live online-IP view).
+
+        This means every *known* user (has ever sent traffic) is covered by step 3
+        even if currently offline (0 online IPs, real historical traffic); only
+        currently-online users get IP data from steps 1-2. ``reset=True`` on
+        ``query_stats`` here: uplink/downlink are consumed as a per-call delta
+        (matches ``TelemetryReport``'s "since last report" semantics - one of these
+        is sent every heartbeat interval) and zeroed server-side after being read -
+        online-IP data is Xray's own live/rolling view and is never reset.
+
+        Never touches ``log.access`` or requires it enabled - confirmed against
+        official docs (xtls.github.io/en/config/policy.html) that statsUserOnline is
+        independent of access logging, preserving this project's no-access-logging
+        privacy stance (TZ-4 SS3.5 / TZ-5 SS6.4)."""
+        stub = stats_pb2_grpc.StatsServiceStub(self._ensure_channel())
+
+        online_emails: list[str] = []
+        async with _translate_grpc_errors("StatsService.GetAllOnlineUsers"):
+            online_response = await stub.GetAllOnlineUsers(stats_pb2.GetAllOnlineUsersRequest())
+        for stat_name in online_response.users:
+            email = stat_name.removeprefix("user>>>").removesuffix(">>>online")
+            online_emails.append(email)
+
+        online_ips: dict[str, list[str]] = {}
+        for email in online_emails:
+            async with _translate_grpc_errors("StatsService.GetStatsOnlineIpList"):
+                ip_list_response = await stub.GetStatsOnlineIpList(
+                    stats_pb2.GetStatsRequest(name=f"user>>>{email}>>>online")
+                )
+            online_ips[email] = list(ip_list_response.ips.keys())
+
+        traffic: dict[str, dict[str, int]] = {}
+        traffic_stats = await self.query_stats(pattern="user>>>", reset=True)
+        for stat_name, value in traffic_stats:
+            # "user>>>{email}>>>traffic>>>uplink" / "...>>>downlink" - email itself
+            # may validly contain ">>>"-free arbitrary text (it's user.uuid in this
+            # project, see api/routes/users.py, so no ambiguity in practice), split
+            # from the known-fixed prefix/suffix rather than a blind rsplit.
+            if not stat_name.startswith("user>>>") or not stat_name.endswith((">>>uplink", ">>>downlink")):
+                continue
+            direction = "uplink" if stat_name.endswith(">>>uplink") else "downlink"
+            email = stat_name.removeprefix("user>>>").removesuffix(f">>>traffic>>>{direction}")
+            traffic.setdefault(email, {"uplink": 0, "downlink": 0})[direction] = value
+
+        all_emails = set(online_ips) | set(traffic)
+        return [
+            UserStats(
+                email=email,
+                online_ips=online_ips.get(email, []),
+                uplink_bytes=traffic.get(email, {}).get("uplink", 0),
+                downlink_bytes=traffic.get(email, {}).get("downlink", 0),
+            )
+            for email in sorted(all_emails)
+        ]
+
+
+@dataclasses.dataclass(frozen=True)
+class UserStats:
+    email: str
+    online_ips: list[str]
+    uplink_bytes: int
+    downlink_bytes: int
