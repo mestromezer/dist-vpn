@@ -1,7 +1,7 @@
 ---
 - name: Restart sshd
   ansible.builtin.systemd:
-    name: ssh # имя systemd-юнита на Debian/Ubuntu — "ssh", не "sshd"
+    name: ssh  # имя systemd-юнита на Debian/Ubuntu — "ssh", не "sshd"
     state: restarted
 
 - name: Restart fail2ban

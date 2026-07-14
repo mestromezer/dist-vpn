@@ -1,6 +1,7 @@
 ---
 galaxy_info:
   role_name: docker_install
+  author: mestromezer
   description: >-
     Установка Docker CE из официального apt-репозитория Docker (не
     дистрибутивного пакета) на Debian/Ubuntu. См. docs/TZ-7-vds-provisioning.md §3.4.

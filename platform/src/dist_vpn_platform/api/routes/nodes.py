@@ -121,6 +121,8 @@ async def patch_node(
         node.label = body.label
     if body.public_address is not None:
         node.public_address = body.public_address
+    if body.p4_domain is not None:
+        node.p4_domain = body.p4_domain
 
     await db.commit()
     await db.refresh(node)

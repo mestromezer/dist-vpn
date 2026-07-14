@@ -260,7 +260,13 @@ async def get_user_connection(
     see schemas/users.py UserConnectionOut docstring. Requires the cascade's entry node
     to have Node.public_address set (PATCH /nodes/{id}) - there is no reliable way to
     infer a client-dialable address otherwise (see models/node.py's public_address
-    docstring), so this 400s with a specific, actionable message rather than guessing."""
+    docstring), so this 400s with a specific, actionable message rather than guessing.
+
+    Also includes a second P4 URI (vless_uri_p4) when the cascade requested the "p4"
+    preset AND the entry node has Node.p4_domain set - unlike public_address above,
+    a missing p4_domain does NOT 400 here: P4 is optional, so the response just omits
+    it (None) rather than blocking the primary REALITY URI on an unrelated fallback's
+    configuration."""
     stmt = select(User).options(selectinload(User.cascade_links)).where(User.id == user_id)
     user = (await db.execute(stmt)).scalar_one_or_none()
     if user is None:
@@ -283,13 +289,28 @@ async def get_user_connection(
         )
 
     vless_uri = xray.build_vless_uri(
+        cascade_id=cascade.id,
         user_uuid=user.uuid,
         entry_public_address=entry_node.public_address,
         hopa_reality_public_key=cascade.hopa_reality_public_key,
         hopa_reality_short_id=cascade.hopa_reality_short_id,
         label=f"{user.name}-{cascade.id[:8]}",
     )
-    return UserConnectionOut(vless_uri=vless_uri)
+
+    vless_uri_p4 = None
+    if "p4" in cascade.hop_a_presets and entry_node.p4_domain:
+        vless_uri_p4 = xray.build_vless_uri_p4(
+            cascade_id=cascade.id,
+            user_uuid=user.uuid,
+            p4_domain=entry_node.p4_domain,
+            label=f"{user.name}-{cascade.id[:8]}",
+        )
+
+    return UserConnectionOut(
+        vless_uri=vless_uri,
+        vless_uri_p4=vless_uri_p4,
+        routing_rules=xray.build_client_routing_rules(),
+    )
 
 
 @router.get("/{user_id}/device-events", response_model=UserDeviceKickEventListResponse)

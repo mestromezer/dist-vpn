@@ -31,7 +31,7 @@
     dest: "{{ agent_mtls_ca_cert_dest }}"
     owner: root
     group: root
-    mode: "0644" # CA-сертификат -- публичный якорь доверия, не секрет сам по себе
+    mode: "0644"  # CA-сертификат -- публичный якорь доверия, не секрет сам по себе
   when: not agent_insecure_dev_mode
 
 - name: Скопировать клиентский mTLS-сертификат ноды (опционально, см. defaults/main.yml)
@@ -126,7 +126,7 @@
 - name: Создать приватную Docker-сеть для Agent↔docker-socket-proxy
   community.docker.docker_network:
     name: "{{ agent_docker_proxy_network }}"
-    internal: true # ни один из двух контейнеров в этой сети не получает выход в интернет через неё
+    internal: true  # ни один из двух контейнеров в этой сети не получает выход в интернет через неё
 
 - name: Запустить docker-socket-proxy (единственный держатель реального docker.sock)
   community.docker.docker_container:

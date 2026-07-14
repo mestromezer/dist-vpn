@@ -1,6 +1,7 @@
 ---
 galaxy_info:
   role_name: base_hardening
+  author: mestromezer
   description: >-
     Базовое хардненинг чистой Debian/Ubuntu VDS перед установкой Agent —
     sudo-пользователь, SSH (Mozilla/CIS), ufw, fail2ban, unattended-upgrades,

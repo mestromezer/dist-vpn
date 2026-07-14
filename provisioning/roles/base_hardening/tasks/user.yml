@@ -36,7 +36,7 @@
     state: present
     exclusive: false
 
-- name: "Разрешить sudo без пароля для {{ provision_user }} (если включено)"
+- name: "Разрешить sudo без пароля (если включено) для {{ provision_user }}"
   ansible.builtin.copy:
     dest: "/etc/sudoers.d/90-{{ provision_user }}-nopasswd"
     content: "{{ provision_user }} ALL=(ALL) NOPASSWD:ALL\n"

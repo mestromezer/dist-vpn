@@ -16,7 +16,7 @@
 # собирает образ ЛОКАЛЬНО на целевом хосте из закреплённой версии
 # исходников, а не предполагает существование образа в ещё не существующем
 # реестре.
-agent_image_source: build_from_source # build_from_source | registry
+agent_image_source: build_from_source  # build_from_source | registry
 
 # --- build_from_source: клонирование репозитория на целевой хост ---
 # Пусто по умолчанию = явная ошибка в preflight, а не молчаливая сборка
@@ -56,7 +56,7 @@ agent_docker_proxy_network: dist-vpn-docker-proxy-net
 # group_vars/all/vault.yml.example), эта роль лишь читает их под теми же
 # именами, под которыми они уже задокументированы там (см.
 # tasks/preflight.yml за проверкой, что они реально заданы).
-agent_requested_role: "{{ role }}" # entry|exit -- см. AGENT_REQUESTED_ROLE / NodeRole в контракте
+agent_requested_role: "{{ role }}"  # entry|exit -- см. AGENT_REQUESTED_ROLE / NodeRole в контракте
 agent_heartbeat_interval_seconds: 15
 agent_log_level: INFO
 

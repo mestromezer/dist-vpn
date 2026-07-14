@@ -1,5 +1,13 @@
 ---
 extends: default
+
+# collections/ is a locally-installed dependency (ansible-galaxy collection
+# install -r requirements.yml, per ansible.cfg's collections_path) - already
+# gitignored (see .gitignore), not this project's own code, and not ours to
+# hold to this file's style rules. Reusing .gitignore here (rather than
+# repeating the pattern) keeps the two in sync by construction.
+ignore-from-file: [.gitignore]
+
 rules:
   # Комментарии на русском часто длиннее 80 символов — не считаем это дефектом.
   line-length: disable
@@ -7,3 +15,16 @@ rules:
   # но некоторые роли по традиции пишут булевы значения как yes/no в vars.
   truthy:
     allowed-values: ["true", "false", "yes", "no"]
+  # ansible-lint запускает свой собственный yaml-профиль поверх этого файла
+  # и требует ровно эти пять значений (иначе не даёт использовать fix-mode
+  # и предупреждает "incompatible custom yamllint configuration") — см.
+  # https://docs.ansible.com/projects/lint/rules/yaml/. Ничего из этого не
+  # конфликтует с остальными правилами выше.
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  braces:
+    max-spaces-inside: 1
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true

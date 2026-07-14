@@ -522,6 +522,34 @@ venv на базе `py -3.13`). Что покрыто, и — важно — **�
 реально проверено" ниже, и "RunTest"'s собственную секцию про то же для
 `connectivity_test.py`):
 
+**`AGENT_TEST_SKIP_CONTAINER_EGRESS_TESTS=1` (только в CI, см.
+`.github/workflows/ci.yml`, `tests/conftest.py::container_egress`)** —
+подтверждено эмпирически на первом же реальном прогоне в GitHub Actions:
+на `ubuntu-latest`-раннере у поднятых Docker-контейнеров вообще нет
+исходящего сетевого пути (не "иногда не достучаться до example.com" —
+даже тест на заведомо нероутящийся адрес-"чёрную дыру"
+(`test_real_timeout_via_blackhole_target`, который должен просто виснуть
+до таймаута) падает мгновенно с "Connection closed unexpectedly"). Пять
+тестов, которым для смысла нужен реальный внешний хост, скипаются в этом
+режиме с понятной причиной, а не превращаются в постоянно красный,
+ничего не значащий статус-чек:
+`test_real_success_via_freedom_outbound_to_example_com`,
+`test_real_container_start_failed_on_broken_preset_protocol` (не про сеть
+напрямую, но классификация исхода всё равно проходит через реальную
+попытку `probe_url`, так что без сети реально получает
+`PROXY_NO_RESPONSE` вместо `CONTAINER_START_FAILED`),
+`test_real_tls_handshake_failed_vless_tls_to_plain_http_endpoint`,
+`test_real_timeout_via_blackhole_target`,
+`test_real_xray_core_get_users_stats_with_real_traffic`.
+`test_real_proxy_no_response_via_refused_redirect` (редиректит на
+`127.0.0.1` внутри самого контейнера — наружу вообще не выходит) и
+`test_real_ephemeral_container_is_always_removed_after_a_probe` (не
+проверяет исход пробы, только факт удаления контейнера) не затронуты —
+согласуется с тем, что дело именно в исходящей сети контейнера, а не в
+доступности Docker как таковой. Переменная не выставлена для локальной
+разработки — там эти пять тестов по-прежнему реально проверяют то, что
+заявлено в их названии.
+
 - `tests/test_control_client.py` — поднимает лёгкий in-process мок
   `AgentControl`-сервера (`tests/mock_platform_server.py`, теперь с реальной
   CSR-подписью через throwaway test-CA) на сгенерированных стабах и гоняет

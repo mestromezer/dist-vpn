@@ -60,7 +60,7 @@
 # (ничего дополнительно не открываем/не конфигурируем для tcp:// — ТЗ-7 §3.4:
 # "демон сокет не публикуется наружу без крайней необходимости").
 
-- name: "Добавить {{ provision_user }} в группу docker (без sudo для docker-команд)"
+- name: "Добавить в группу docker (без sudo для docker-команд): {{ provision_user }}"
   ansible.builtin.user:
     name: "{{ provision_user }}"
     groups: docker

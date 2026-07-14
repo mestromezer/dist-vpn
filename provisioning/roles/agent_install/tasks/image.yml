@@ -17,7 +17,7 @@
 # uploadpack.allowReachableSHA1InWant) — эта задача может упасть. Теги
 # обычно работают без проблем (это advertised ref). Если это станет
 # проблемой на практике — убрать depth (полный clone) как надёжный fallback.
-- name: "Клонировать репозиторий (закреплённая версия {{ agent_source_git_ref }}) на целевой хост"
+- name: "Клонировать репозиторий на целевой хост, закреплённая версия {{ agent_source_git_ref }}"
   ansible.builtin.git:
     repo: "{{ agent_source_git_repo }}"
     dest: "{{ agent_source_checkout_dir }}"

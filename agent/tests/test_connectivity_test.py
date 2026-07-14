@@ -126,7 +126,7 @@ def real_tester():
     return ConnectivityTester(make_settings(), client=client)
 
 
-def test_real_success_via_freedom_outbound_to_example_com(real_tester):
+def test_real_success_via_freedom_outbound_to_example_com(real_tester, container_egress):
     """Real, full path: a real ephemeral Docker container running real
     Xray-core with a freedom (direct-egress) outbound, a real SOCKS5 proxy,
     and a real HTTP GET through it to https://example.com. This is the
@@ -147,7 +147,7 @@ def test_real_success_via_freedom_outbound_to_example_com(real_tester):
     assert "200" in result.detail
 
 
-def test_real_container_start_failed_on_broken_preset_protocol(real_tester):
+def test_real_container_start_failed_on_broken_preset_protocol(real_tester, container_egress):
     """Real: a preset naming a protocol Xray's config loader doesn't
     recognize makes the real container exit almost immediately (verified
     during this slice's development: real exit code 23, Xray's own log
@@ -156,6 +156,13 @@ def test_real_container_start_failed_on_broken_preset_protocol(real_tester):
     wording, which could change between Xray versions) -- see
     connectivity_test.py's ``_wait_for_container_port`` for the real status/
     exit-code polling this outcome depends on.
+
+    Needs container_egress too, despite not being "about" reaching
+    example.com: the outcome-classification path still runs the actual
+    probe_url attempt, so a container-network-egress failure here gets
+    misclassified as PROXY_NO_RESPONSE instead of CONTAINER_START_FAILED -
+    confirmed by the CI run that first surfaced this (see the fixture's own
+    docstring).
     """
     broken_preset = json.dumps({"protocol": "not-a-real-protocol", "settings": {}})
     result = real_tester.run_test(
@@ -169,7 +176,7 @@ def test_real_container_start_failed_on_broken_preset_protocol(real_tester):
     assert result.outcome == pb2.TEST_OUTCOME_CONTAINER_START_FAILED
 
 
-def test_real_tls_handshake_failed_vless_tls_to_plain_http_endpoint(real_tester):
+def test_real_tls_handshake_failed_vless_tls_to_plain_http_endpoint(real_tester, container_egress):
     """Real, best-effort-*classified* (see connectivity_test.py module
     docstring for why TLS_HANDSHAKE_FAILED can only ever be best-effort
     from a black-box SOCKS client): a vless+tls outbound pointed at a
@@ -235,7 +242,7 @@ def test_real_proxy_no_response_via_refused_redirect(real_tester):
     assert result.outcome == pb2.TEST_OUTCOME_PROXY_NO_RESPONSE
 
 
-def test_real_timeout_via_blackhole_target(real_tester):
+def test_real_timeout_via_blackhole_target(real_tester, container_egress):
     """Real: freedom outbound (no redirect -- goes wherever the probe asks),
     probing a well-known non-routable-in-practice address
     (``10.255.255.1``) with a short ``timeout_seconds``. Real Xray-core

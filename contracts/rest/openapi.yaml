@@ -168,6 +168,7 @@ paths:
                 role: { $ref: "#/components/schemas/NodeRole" }
                 label: { type: string }
                 public_address: { type: string }
+                p4_domain: { type: string, description: "Домен для опционального пресета P4 (VLESS+TLS/WebSocket) - см. Node.p4_domain" }
       responses:
         "200":
           content:
@@ -520,6 +521,14 @@ components:
             /nodes/{node_id}, никогда не выводится из Node.hostname (тот
             self-reported агентом при enrollment и не обязательно совпадает с
             публичным адресом).
+        p4_domain:
+          type: string
+          description: >-
+            Домен для опционального пресета P4 (VLESS+TLS/WebSocket, TZ-4 §3.3/§3.4) -
+            тот же паттерн, что и public_address (админ-задаваемое через PATCH
+            /nodes/{node_id}), но используется только когда каскад реально запросил
+            пресет "p4" (Cascade.hop_a_presets) - см. GET
+            /users/{user_id}/connection/{cascade_id}.
 
     CascadeInput:
       type: object
