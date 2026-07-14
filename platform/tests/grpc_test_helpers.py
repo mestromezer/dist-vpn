@@ -87,15 +87,34 @@ async def seed_enrollment_token(role: NodeRole = NodeRole.ENTRY) -> str:
 
 class FakeAgent:
     """A simulated connected Agent: enrolls with a freshly-seeded token, then
-    immediately acknowledges every Command it receives with CommandResult(success=True)
-    - close() ends its stream cleanly. `received_commands` records every Command seen,
-    in order, for assertions."""
+    immediately acknowledges every Command it receives - close() ends its stream
+    cleanly. `received_commands` records every Command seen, in order, for assertions.
 
-    def __init__(self) -> None:
+    A `run_test` Command (Command.op == "run_test", dispatched via
+    grpc_server/servicer.py::dispatch_test - see services/link_tests.py) gets a
+    `TestResult` reply instead of a `CommandResult`, matching what a real Agent sends
+    (contracts/proto/agent_control.proto: RunTest is answered by TestResult, correlated
+    by test_id, not command_id/CommandResult) - the correlation mechanism itself
+    (SessionRegistry.resolve()) is command_id-agnostic and resolves on either message
+    kind, but a test harness that always replied with CommandResult would silently mask
+    a real Agent behaving differently. `test_result_outcome`/`test_result_latency_ms`/
+    `test_result_detail` are overridable per-test (see test_cascades.py) to exercise
+    LinkTest outcomes other than the default success."""
+
+    def __init__(
+        self,
+        *,
+        test_result_outcome: "pb.TestOutcome.ValueType" = pb.TEST_OUTCOME_SUCCESS,
+        test_result_latency_ms: int = 42,
+        test_result_detail: str = "ok",
+    ) -> None:
         self.requests = FakeRequestIterator()
         self.received_commands: list[pb.Command] = []
         self.node_id: str | None = None
         self._ready = asyncio.Event()
+        self._test_result_outcome = test_result_outcome
+        self._test_result_latency_ms = test_result_latency_ms
+        self._test_result_detail = test_result_detail
         self._session = AgentControlServicer().Session(self.requests, FakeContext())
         self._pump_task = asyncio.create_task(self._pump())
 
@@ -108,11 +127,23 @@ class FakeAgent:
                 self._ready.set()
             elif kind == "command":
                 self.received_commands.append(message.command)
-                await self.requests.send(
-                    pb.AgentMessage(
-                        command_result=pb.CommandResult(command_id=message.command.command_id, success=True)
+                if message.command.WhichOneof("op") == "run_test":
+                    await self.requests.send(
+                        pb.AgentMessage(
+                            test_result=pb.TestResult(
+                                test_id=message.command.run_test.test_id,
+                                outcome=self._test_result_outcome,
+                                latency_ms=self._test_result_latency_ms,
+                                detail=self._test_result_detail,
+                            )
+                        )
                     )
-                )
+                else:
+                    await self.requests.send(
+                        pb.AgentMessage(
+                            command_result=pb.CommandResult(command_id=message.command.command_id, success=True)
+                        )
+                    )
 
     async def connect(self, role: NodeRole, *, hostname: str = "") -> str:
         plaintext = await seed_enrollment_token(role)

@@ -28,6 +28,7 @@ from dist_vpn_platform.models.admin_account import AdminAccount
 from dist_vpn_platform.security import mtls_ca
 from dist_vpn_platform.security.passwords import hash_password
 from dist_vpn_platform.security.rate_limit import limiter
+from dist_vpn_platform.services import link_tests
 
 
 @pytest_asyncio.fixture
@@ -41,6 +42,11 @@ async def db_engine() -> AsyncIterator[None]:
 
     yield
 
+    # services/link_tests.py::start_link_test() fires a background task per test-
+    # request that outlives the HTTP response - drain it before disposing the engine/
+    # deleting the sqlite file below, or a still-running task can race the teardown
+    # (see wait_for_background_tasks()'s docstring for the failure mode this avoids).
+    await link_tests.wait_for_background_tasks()
     await engine.dispose()
     db_path.unlink(missing_ok=True)
 
