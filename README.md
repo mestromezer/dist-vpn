@@ -13,6 +13,10 @@
 | [`provisioning/`](provisioning/) | Ansible-плейбуки подготовки VDS | [TZ-7](docs/TZ-7-vds-provisioning.md) |
 | [`contracts/`](contracts/) | gRPC/REST контракты между компонентами — **менять только через PR** | — |
 
+Функционал, который реализован и покрыт тестами с моками, но ещё не проверен против
+настоящей инфраструктуры (реальные VDS, браузер, Ansible-контроллер) — см.
+[`TESTING.md`](TESTING.md), пройти после деплоя.
+
 ## Документы (`docs/`)
 
 1. [TZ-1-rossiyskiy-vds.md](docs/TZ-1-rossiyskiy-vds.md) — критерии выбора РФ-VDS.
