@@ -23,3 +23,14 @@ class LinkTestOut(BaseModel):
 
 class LinkTestStartResponse(BaseModel):
     test_id: str
+
+
+class LinkTestListResponse(BaseModel):
+    items: list[LinkTestOut]
+    # Additive field, same items+total envelope pattern already used by
+    # CascadeListResponse/UserListResponse (see schemas/cascades.py,
+    # schemas/users.py) - contracts/rest/openapi.yaml's inline schema for this path
+    # already declares both `items` and `total` (see the "Добавлено после реализации
+    # Admin Client" note next to GET /cascades/{id}/tests in the contract), so this
+    # one needs no deviation note of its own.
+    total: int

@@ -13,9 +13,14 @@ Scope for this slice (see platform/README.md "Что это делает" / TODO
   - Command dispatch (Platform -> Agent): a `SessionRegistry` tracks each connected
     Agent's open bidi-stream (keyed by node_id) so `dispatch_command()` can enqueue a
     real `Command` onto that node's stream and await the matching `CommandResult`,
-    correlated by `command_id` (same mechanism for `TestResult`/`test_id`). This used
-    to be a documented stub (`raise NotImplementedError`, see git history on this
-    file) - now implemented per the command-dispatch slice.
+    correlated by `command_id`. This used to be a documented stub
+    (`raise NotImplementedError`, see git history on this file) - now implemented per
+    the command-dispatch slice.
+  - `dispatch_test()`: the same enqueue+correlate mechanism as `dispatch_command()`,
+    but non-blocking (returns an `asyncio.Task` instead of awaiting inline) and
+    correlated by `TestResult.test_id` through the same `session.pending` dict -
+    POST /cascades/{id}/test (services/link_tests.py) uses this so the HTTP response
+    doesn't block on the Agent actually running the test (TZ-5 §4.3).
 """
 from __future__ import annotations
 
@@ -134,13 +139,16 @@ class SessionRegistry:
 _registry = SessionRegistry()
 
 
-async def dispatch_command(node_id: str, command: pb.Command, *, timeout: float = 10.0) -> pb.CommandResult:
-    """Enqueue `command` onto node_id's live bidi-stream and await the matching
-    CommandResult (correlated by `command.command_id`).
-
-    Raises NodeNotConnectedError immediately if the node has no open session right
-    now, or CommandDispatchTimeoutError if the Agent doesn't reply within `timeout`
-    seconds (e.g. it's connected but wedged).
+async def _enqueue_and_track(node_id: str, command: pb.Command) -> tuple[NodeSession, asyncio.Future]:
+    """Shared first half of dispatch_command()/dispatch_test(): look up the node's
+    live session (raising NodeNotConnectedError immediately if there isn't one),
+    register a pending correlation future keyed by `command.command_id`, and enqueue
+    the Command onto the node's outbox. Both CommandResult.command_id and
+    TestResult.test_id resolve through this same `session.pending` dict (see
+    SessionRegistry.resolve() above) - callers that dispatch a RunTest MUST set
+    `command.command_id == command.run_test.test_id` for the correlation to find this
+    entry when the Agent's reply comes back as a TestResult rather than a
+    CommandResult (see services/link_tests.py).
     """
     session = _registry.get(node_id)
     if session is None:
@@ -150,6 +158,18 @@ async def dispatch_command(node_id: str, command: pb.Command, *, timeout: float 
     result_future: asyncio.Future = loop.create_future()
     session.pending[command.command_id] = result_future
     await session.outbox.put(pb.PlatformMessage(command=command))
+    return session, result_future
+
+
+async def dispatch_command(node_id: str, command: pb.Command, *, timeout: float = 10.0) -> pb.CommandResult:
+    """Enqueue `command` onto node_id's live bidi-stream and await the matching
+    CommandResult (correlated by `command.command_id`).
+
+    Raises NodeNotConnectedError immediately if the node has no open session right
+    now, or CommandDispatchTimeoutError if the Agent doesn't reply within `timeout`
+    seconds (e.g. it's connected but wedged).
+    """
+    session, result_future = await _enqueue_and_track(node_id, command)
     try:
         return await asyncio.wait_for(result_future, timeout=timeout)
     except asyncio.TimeoutError as exc:
@@ -159,6 +179,34 @@ async def dispatch_command(node_id: str, command: pb.Command, *, timeout: float 
         ) from exc
     finally:
         session.pending.pop(command.command_id, None)
+
+
+async def dispatch_test(node_id: str, command: pb.Command, *, timeout: float = 30.0) -> "asyncio.Task[pb.TestResult]":
+    """Like dispatch_command(), but for `Command(run_test=...)` specifically and
+    non-blocking: enqueues the Command and registers the pending correlation exactly
+    like dispatch_command() does (raising NodeNotConnectedError immediately, before
+    returning, if the node isn't connected right now), but then returns a Task instead
+    of awaiting it inline.
+
+    POST /cascades/{id}/test (TZ-5 §4.3) must return 202 without blocking on the
+    Agent's reply - callers await the returned Task in the background instead (see
+    services/link_tests.py), which resolves to the correlated TestResult or raises
+    CommandDispatchTimeoutError if the Agent doesn't reply within `timeout` seconds.
+    """
+    session, result_future = await _enqueue_and_track(node_id, command)
+
+    async def _await_result() -> pb.TestResult:
+        try:
+            return await asyncio.wait_for(result_future, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise CommandDispatchTimeoutError(
+                f"node {node_id!r} did not return a TestResult for test "
+                f"{command.command_id!r} within {timeout}s"
+            ) from exc
+        finally:
+            session.pending.pop(command.command_id, None)
+
+    return asyncio.create_task(_await_result())
 
 
 class AgentControlServicer(pb_grpc.AgentControlServicer):

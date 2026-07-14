@@ -13,9 +13,12 @@ philosophy already used for node decommissioning (api/routes/nodes.py). Actual
 automatic reconciliation once a lagging Agent reconnects is not built in this slice -
 see platform/README.md TODO.
 
-PATCH /cascades/{id}, GET /cascades/{id}/events and POST /cascades/{id}/test remain
-out of scope for this slice (not requested) - still declared with 501 below so the
-contract shape stays visible.
+POST /cascades/{id}/test and GET /cascades/{id}/tests (TZ-5 §4.3) are now real too -
+see services/link_tests.py for the RunTest dispatch/LinkTest persistence and
+api/routes/tests.py for GET /tests/{id}.
+
+PATCH /cascades/{id} and GET /cascades/{id}/events remain out of scope for this slice
+(not requested) - still declared with 501 below so the contract shape stays visible.
 """
 from __future__ import annotations
 
@@ -34,10 +37,14 @@ from dist_vpn_platform.grpc_server.servicer import new_command_id
 from dist_vpn_platform.models.admin_account import AdminAccount
 from dist_vpn_platform.models.cascade import Cascade, CascadeExitNode, CascadeStatus
 from dist_vpn_platform.models.health_event import HealthEvent
+from dist_vpn_platform.models.link_test import LinkTest
 from dist_vpn_platform.models.node import Node
 from dist_vpn_platform.models.user import UserCascade
 from dist_vpn_platform.schemas.cascades import CascadeInput, CascadeListResponse, CascadeOut
+from dist_vpn_platform.schemas.tests import LinkTestListResponse, LinkTestOut, LinkTestStartResponse
+from dist_vpn_platform.services import link_tests
 from dist_vpn_platform.services import xray_templates as xray
+from dist_vpn_platform.services.event_bus import publish_health_event
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("dist_vpn_platform.audit")
@@ -168,16 +175,16 @@ async def create_cascade(
     else:
         cascade.status = CascadeStatus.UP
 
-    db.add(
-        HealthEvent(
-            cascade_id=cascade.id,
-            from_status=CascadeStatus.DOWN.value,
-            to_status=cascade.status.value,
-            reason=f"cascade created by admin {admin.username}",
-        )
+    health_event = HealthEvent(
+        cascade_id=cascade.id,
+        from_status=CascadeStatus.DOWN.value,
+        to_status=cascade.status.value,
+        reason=f"cascade created by admin {admin.username}",
     )
+    db.add(health_event)
     await db.commit()
 
+    publish_health_event(health_event)  # TZ-5 §4.3: push to WS /events subscribers
     audit_logger.info(
         "cascade_created",
         extra={"admin_id": admin.id, "cascade_id": cascade.id, "status": cascade.status.value},
@@ -290,10 +297,51 @@ async def list_cascade_events(cascade_id: str, _admin: AdminAccount = Depends(re
     raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, _NOT_IMPLEMENTED)
 
 
-@router.post("/{cascade_id}/test", status_code=status.HTTP_202_ACCEPTED)
-async def start_cascade_test(cascade_id: str, _admin: AdminAccount = Depends(require_admin)) -> None:
-    # TODO(follow-up slice): dispatch_command(entry_node_id, Command(run_test=...)),
-    # correlate the async TestResult by test_id (TZ-5 §4.3) - the dispatch mechanism
-    # this needs (grpc_server/servicer.py resolve()-by-test_id) already exists as of
-    # this slice, this route just isn't wired to it yet (not requested).
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, _NOT_IMPLEMENTED)
+@router.post("/{cascade_id}/test", status_code=status.HTTP_202_ACCEPTED, response_model=LinkTestStartResponse)
+async def start_cascade_test(
+    cascade_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminAccount = Depends(require_admin),
+) -> LinkTestStartResponse:
+    cascade = await db.get(Cascade, cascade_id)
+    if cascade is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Cascade not found")
+
+    # services/link_tests.py persists the LinkTest row and dispatches RunTest to the
+    # entry node itself (own session_scope(), independent of this request's `db`) -
+    # returns as soon as the row exists, never blocks on the Agent (TZ-5 §4.3: "202,
+    # результат — через /tests/{test_id} или WebSocket").
+    link_test = await link_tests.start_link_test(cascade_id, cascade.entry_node_id, initiated_by=admin.username)
+
+    audit_logger.info(
+        "cascade_test_started",
+        extra={"admin_id": admin.id, "cascade_id": cascade_id, "test_id": link_test.id},
+    )
+    return LinkTestStartResponse(test_id=link_test.id)
+
+
+@router.get("/{cascade_id}/tests", response_model=LinkTestListResponse)
+async def list_cascade_tests(
+    cascade_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    _admin: AdminAccount = Depends(require_admin),
+) -> LinkTestListResponse:
+    cascade = await db.get(Cascade, cascade_id)
+    if cascade is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Cascade not found")
+
+    total = (
+        await db.execute(select(func.count()).select_from(LinkTest).where(LinkTest.cascade_id == cascade_id))
+    ).scalar_one()
+    stmt = (
+        select(LinkTest)
+        .where(LinkTest.cascade_id == cascade_id)
+        .order_by(LinkTest.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    items = (await db.execute(stmt)).scalars().all()
+
+    return LinkTestListResponse(items=[LinkTestOut.model_validate(item) for item in items], total=total)
