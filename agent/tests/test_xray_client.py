@@ -33,14 +33,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import pathlib
+import shutil
+import tempfile
 import time
 
 import grpc
 import pytest
 from google.protobuf import json_format
 
+from dist_vpn_agent.config import AgentSettings
 from dist_vpn_agent.generated.xray.app.router.command import command_pb2 as routing_pb2
 from dist_vpn_agent.generated.xray.app.router import config_pb2 as router_config_pb2
+from dist_vpn_agent.xray_bootstrap import ensure_base_config
 from dist_vpn_agent.xray_client import XrayClient, XrayClientError
 from mock_xray_server import MockHandlerServicer, MockRoutingServicer, MockStatsServicer, running
 
@@ -286,29 +292,6 @@ _REAL_XRAY_CONTAINER_NAME = "dist-vpn-agent-test-xray-core-client"
 _REAL_XRAY_HOST_PORT = 19998
 
 
-def _real_xray_config(port: int) -> str:
-    # Minimal config exposing just the control API (dokodemo-door "api"
-    # inbound routed to the "api" outbound tag) -- the same shape used to
-    # manually verify this slice against a real binary (see final report).
-    return json.dumps(
-        {
-            "log": {"loglevel": "warning"},
-            "api": {"tag": "api", "services": ["HandlerService", "RoutingService", "StatsService"]},
-            "inbounds": [
-                {
-                    "listen": "0.0.0.0",
-                    "port": port,
-                    "protocol": "dokodemo-door",
-                    "settings": {"address": "127.0.0.1"},
-                    "tag": "api",
-                }
-            ],
-            "outbounds": [{"protocol": "freedom", "tag": "direct"}],
-            "routing": {"rules": [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]},
-        }
-    )
-
-
 @pytest.fixture
 def real_xray_address(tmp_path):
     docker = pytest.importorskip("docker", reason="docker-py not installed")
@@ -326,7 +309,19 @@ def real_xray_address(tmp_path):
         pass
 
     config_path = tmp_path / "config.json"
-    config_path.write_text(_real_xray_config(_REAL_XRAY_HOST_PORT))
+    # Real production code path, not a hand-duplicated fixture (was drifting
+    # from xray_bootstrap.py's actual output until this slice) - this is the
+    # only thing standing between "unit tests pass" and "the generated base
+    # config actually lets a real Xray-core container come up with a working
+    # api/stats/policy setup", which is exactly what xray_bootstrap.py's own
+    # docstring flags as previously never verified end to end.
+    ensure_base_config(
+        AgentSettings(
+            insecure_dev_mode=True,
+            xray_config_host_path=config_path,
+            xray_api_address=f"127.0.0.1:{_REAL_XRAY_HOST_PORT}",
+        )
+    )
 
     container = client.containers.run(
         "ghcr.io/xtls/xray-core:latest",
@@ -412,6 +407,198 @@ async def test_real_xray_core_add_remove_user_via_alter_inbound(real_xray_addres
         await client.remove_inbound("verify-users")
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_xray_core_get_users_stats_no_traffic_yet(real_xray_address):
+    """Real proof that xray_bootstrap.py's generated policy/stats config actually
+    lets the StatsService RPC chain get_users_stats() uses succeed end to end - the
+    real_xray_address fixture above now runs through ensure_base_config() (real
+    production code), not a hand-duplicated fixture, so this is direct evidence the
+    previously-missing config gap (see xray_bootstrap.py's module docstring) is
+    closed, not just that the unit tests believe the right JSON shape was written.
+    No client connects in this test (no real traffic/online IPs to report) - see
+    test_real_xray_core_get_users_stats_with_real_traffic below for that.
+    """
+    client = XrayClient(real_xray_address)
+    await _wait_until_ready(client)
+    try:
+        empty = await client.get_users_stats()
+        assert empty == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_xray_core_get_users_stats_with_real_traffic():
+    """Full loopback proof: a second, genuine Xray-core container acts as a VLESS
+    *client* dialing a server this test stands up itself, proxies one real HTTP
+    request through it, and confirms get_users_stats() then reports that user's
+    real uplink/downlink byte counts and online IP - this is exactly the empirical
+    check (run manually once as a throwaway script against the real
+    ghcr.io/xtls/xray-core:latest image, confirming the deployed version is 26.3.27)
+    that found GetUsersStats returns UNIMPLEMENTED on that version even though the
+    vendored proto (pinned to a later tag) declares it, and that the three-RPC
+    fallback (GetAllOnlineUsers + GetStatsOnlineIpList + QueryStats) is what that
+    specific real version actually supports - now automated instead of only having
+    been checked by hand once.
+
+    Deliberately does NOT use the shared real_xray_address fixture above: that
+    fixture's server container only publishes its API port at creation time (the
+    only port every *other* test in this file needs) - Docker cannot add a port
+    mapping to an already-running container, so a VLESS inbound added dynamically
+    afterwards (this test's whole point) would never be reachable from the second,
+    client-side container. Confirmed as the actual cause of a real, reproducible
+    failure (RemoteDisconnected) during this slice's development - initially
+    mis-diagnosed as a startup-timing race, until comparing against a working
+    throwaway script showed the only real difference was this port publish.
+    """
+    docker = pytest.importorskip("docker", reason="docker-py not installed")
+    requests = pytest.importorskip("requests", reason="requests not installed")
+    from docker.errors import DockerException, NotFound  # noqa: PLC0415
+
+    try:
+        dc = docker.from_env()
+        dc.ping()
+    except DockerException as err:
+        pytest.skip(f"no real Docker Engine available in this environment: {err}")
+
+    server_api_port = 21502
+    server_vless_port = 21503
+    server_container_name = "dist-vpn-agent-test-xray-core-traffic-server"
+    user_uuid = "c942492e-7435-5e64-be5f-9deb59c41922"
+    user_email = "stats-traffic-verify@example.com"
+    client_container_name = "dist-vpn-agent-test-xray-core-traffic-client"
+    client_socks_port = 21504
+
+    for name in (server_container_name, client_container_name):
+        try:
+            dc.containers.get(name).remove(force=True)
+        except NotFound:
+            pass
+
+    server_config_dir = None
+    server_container = None
+    try:
+        # A directory, not tempfile.mkstemp()'s pre-created empty file -
+        # ensure_base_config() deliberately no-ops on a path that already exists
+        # (see its own idempotency test), so a pre-created empty file would leave
+        # an empty, invalid config mounted into the container - exactly what
+        # happened here once before this was fixed.
+        server_config_dir = tempfile.mkdtemp()
+        server_config_path = pathlib.Path(server_config_dir) / "xray-config.json"
+        settings = AgentSettings(
+            insecure_dev_mode=True,
+            xray_api_address=f"127.0.0.1:{server_api_port}",
+        ).model_copy(update={"xray_config_host_path": server_config_path})
+        ensure_base_config(settings)
+
+        server_container = dc.containers.run(
+            "ghcr.io/xtls/xray-core:latest",
+            name=server_container_name,
+            command=["run", "-config", "/etc/xray/config.json"],
+            volumes={str(server_config_path): {"bind": "/etc/xray/config.json", "mode": "ro"}},
+            # Both ports published at creation time - the whole point of this test
+            # not reusing the shared fixture, see the docstring above.
+            ports={
+                f"{server_api_port}/tcp": ("127.0.0.1", server_api_port),
+                f"{server_vless_port}/tcp": ("127.0.0.1", server_vless_port),
+            },
+            detach=True,
+        )
+
+        client = XrayClient(f"127.0.0.1:{server_api_port}")
+        await _wait_until_ready(client)
+
+        await client.add_inbound(
+            json.dumps(
+                {
+                    "tag": "traffic-verify-in",
+                    "listen": "0.0.0.0",
+                    "port": server_vless_port,
+                    "protocol": "vless",
+                    "settings": {"users": [], "decryption": "none"},
+                    "streamSettings": {"network": "raw", "security": "none"},
+                }
+            )
+        )
+        await client.add_user("traffic-verify-in", uuid=user_uuid, email=user_email, flow="")
+        await client.add_routing_rule(
+            "traffic-verify-rule", json.dumps({"inboundTag": ["traffic-verify-in"], "tag": "direct"})
+        )
+
+        client_config_path = None
+        try:
+            client_xray_config = {
+                "log": {"loglevel": "warning"},
+                "inbounds": [{"listen": "0.0.0.0", "port": client_socks_port, "protocol": "socks", "settings": {"udp": False}}],
+                "outbounds": [
+                    {
+                        "tag": "srv",
+                        "protocol": "vless",
+                        "settings": {
+                            "vnext": [
+                                {
+                                    "address": "host.docker.internal",
+                                    "port": server_vless_port,
+                                    "users": [{"id": user_uuid, "encryption": "none"}],
+                                }
+                            ]
+                        },
+                        "streamSettings": {"network": "raw", "security": "none"},
+                    }
+                ],
+            }
+            fd, client_config_path = tempfile.mkstemp(suffix=".json")
+            with os.fdopen(fd, "w") as f:
+                json.dump(client_xray_config, f)
+
+            client_container = dc.containers.run(
+                "ghcr.io/xtls/xray-core:latest",
+                name=client_container_name,
+                command=["run", "-config", "/etc/xray/config.json"],
+                volumes={client_config_path: {"bind": "/etc/xray/config.json", "mode": "ro"}},
+                ports={f"{client_socks_port}/tcp": ("127.0.0.1", client_socks_port)},
+                extra_hosts={"host.docker.internal": "host-gateway"},
+                detach=True,
+            )
+            try:
+                proxies = {
+                    "http": f"socks5h://127.0.0.1:{client_socks_port}",
+                    "https": f"socks5h://127.0.0.1:{client_socks_port}",
+                }
+                last_err: Exception | None = None
+                for _ in range(20):
+                    try:
+                        response = requests.get("http://example.com", proxies=proxies, timeout=5)
+                        assert response.status_code == 200
+                        break
+                    except Exception as err:  # noqa: BLE001 - client container needs a moment to bind
+                        last_err = err
+                        await asyncio.sleep(0.5)
+                else:
+                    raise AssertionError(f"tunnel never became usable: {last_err}")
+            finally:
+                client_container.remove(force=True)
+        finally:
+            if client_config_path:
+                os.unlink(client_config_path)
+
+        stats = await client.get_users_stats()
+        this_user = next((u for u in stats if u.email == user_email), None)
+        assert this_user is not None, f"expected {user_email} in get_users_stats() after real traffic: {stats}"
+        assert this_user.uplink_bytes > 0
+        assert this_user.downlink_bytes > 0
+        assert this_user.online_ips  # real client IP as seen inside the server container's netns
+
+        await client.remove_user("traffic-verify-in", email=user_email)
+        await client.remove_inbound("traffic-verify-in")
+        await client.close()
+    finally:
+        if server_container is not None:
+            server_container.remove(force=True)
+        if server_config_dir:
+            shutil.rmtree(server_config_dir, ignore_errors=True)
 
 
 @pytest.mark.asyncio
