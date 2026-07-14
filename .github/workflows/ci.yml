@@ -97,9 +97,19 @@ jobs:
       - name: Install required collections
         working-directory: provisioning
         run: ansible-galaxy collection install -r requirements.yml
-      - name: yamllint
+      # Run both linters even if the first one finds something, so a single
+      # CI run surfaces every finding at once instead of yamllint blocking
+      # ansible-lint from ever running (GitHub Actions stops a job at the
+      # first failing step by default) - neither tool can be previewed on
+      # Windows (see provisioning/.ansible-lint's own note), so minimizing
+      # round-trips here actually matters.
+      - name: yamllint + ansible-lint
         working-directory: provisioning
-        run: yamllint .
-      - name: ansible-lint
-        working-directory: provisioning
-        run: ansible-lint
+        run: |
+          set +e
+          yamllint .
+          yamllint_status=$?
+          ansible-lint
+          ansible_status=$?
+          set -e
+          exit $(( yamllint_status != 0 || ansible_status != 0 ))
