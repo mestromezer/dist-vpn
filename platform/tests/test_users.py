@@ -210,7 +210,8 @@ async def test_get_connection_returns_a_working_vless_uri(client: AsyncClient, s
             f"/users/{user_body['id']}/connection/{cascade_id}", headers=_auth_headers(token)
         )
         assert response.status_code == 200
-        vless_uri = response.json()["vless_uri"]
+        body = response.json()
+        vless_uri = body["vless_uri"]
 
         assert vless_uri.startswith(f"vless://{user_body['uuid']}@vpn.example.net:443?")
         parsed = urllib.parse.urlparse(vless_uri)
@@ -219,6 +220,91 @@ async def test_get_connection_returns_a_working_vless_uri(client: AsyncClient, s
         assert params["pbk"] == [cascade_body["hopa_reality_public_key"]]
         assert params["sid"] == [cascade_body["hopa_reality_short_id"]]
         assert params["type"] == ["tcp"]
+        assert body["routing_rules"]  # non-empty - see build_client_routing_rules
+        assert any(r.get("outboundTag") == "block" for r in body["routing_rules"])
+    finally:
+        await entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_get_connection_includes_p4_uri_when_requested_and_domain_set(
+    client: AsyncClient, seeded_admin: dict
+) -> None:
+    entry_agent = FakeAgent()
+    try:
+        entry_node_id = await entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+
+        await client.patch(
+            f"/nodes/{entry_node_id}",
+            json={"public_address": "vpn.example.net", "p4_domain": "cdn.example.net"},
+            headers=_auth_headers(token),
+        )
+
+        cascade_response = await client.post(
+            "/cascades",
+            json={"entry_node_id": entry_node_id, "exit_node_ids": [], "hop_a_presets": ["p1", "p4"]},
+            headers=_auth_headers(token),
+        )
+        cascade_id = cascade_response.json()["id"]
+
+        user_response = await client.post(
+            "/users", json={"name": "frank", "cascade_ids": [cascade_id]}, headers=_auth_headers(token)
+        )
+        user_body = user_response.json()
+
+        response = await client.get(
+            f"/users/{user_body['id']}/connection/{cascade_id}", headers=_auth_headers(token)
+        )
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["vless_uri_p4"] is not None
+        assert body["vless_uri_p4"].startswith(f"vless://{user_body['uuid']}@cdn.example.net:8443?")
+        parsed = urllib.parse.urlparse(body["vless_uri_p4"])
+        params = urllib.parse.parse_qs(parsed.query)
+        assert params["security"] == ["tls"]
+        assert params["type"] == ["ws"]
+        assert params["sni"] == ["cdn.example.net"]
+    finally:
+        await entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_get_connection_omits_p4_uri_when_p4_was_not_requested(
+    client: AsyncClient, seeded_admin: dict
+) -> None:
+    """p4_domain being set on the node isn't enough on its own - the cascade must have
+    actually requested the "p4" preset, otherwise there's no P4 inbound for this URI to
+    point at."""
+    entry_agent = FakeAgent()
+    try:
+        entry_node_id = await entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+
+        await client.patch(
+            f"/nodes/{entry_node_id}",
+            json={"public_address": "vpn.example.net", "p4_domain": "cdn.example.net"},
+            headers=_auth_headers(token),
+        )
+
+        cascade_response = await client.post(
+            "/cascades",
+            json={"entry_node_id": entry_node_id, "exit_node_ids": [], "hop_a_presets": ["p1"]},
+            headers=_auth_headers(token),
+        )
+        cascade_id = cascade_response.json()["id"]
+
+        user_response = await client.post(
+            "/users", json={"name": "grace", "cascade_ids": [cascade_id]}, headers=_auth_headers(token)
+        )
+        user_body = user_response.json()
+
+        response = await client.get(
+            f"/users/{user_body['id']}/connection/{cascade_id}", headers=_auth_headers(token)
+        )
+        assert response.status_code == 200
+        assert response.json()["vless_uri_p4"] is None
     finally:
         await entry_agent.close()
 

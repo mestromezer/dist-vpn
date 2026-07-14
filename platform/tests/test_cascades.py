@@ -123,6 +123,13 @@ async def test_create_cascade_dispatches_commands_and_reports_up(
         assert hopb_inbound["port"] == 443
         assert hopb_outbound["settings"]["vnext"][0]["port"] == 443
         assert hopb_inbound_reality["privateKey"]
+        # REALITY donor rotation (services/xray_templates.py _select_reality_donor):
+        # the Hop A inbound's dest must actually match the SNI it advertises, and the
+        # Hop B outbound (REALITY client role)'s serverName must match what the Hop B
+        # inbound (REALITY server role) accepts for the same link - otherwise the
+        # handshake on that hop can never complete.
+        assert hopa_reality["dest"] == f"{hopa_reality['serverNames'][0]}:443"
+        assert hopb_outbound_reality["serverName"] == hopb_inbound_reality["serverNames"][0]
         # The Hop A->B outbound (entry, REALITY client role) must reference the exit
         # node's own Hop B inbound public identity - fetch the persisted pairing row
         # directly since GET /cascades doesn't expose Hop B key material via the API
@@ -142,6 +149,68 @@ async def test_create_cascade_dispatches_commands_and_reports_up(
     finally:
         await entry_agent.close()
         await exit_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_create_cascade_with_p4_preset_dispatches_a_second_inbound(
+    client: AsyncClient, seeded_admin: dict
+) -> None:
+    """hop_a_presets: ["p1", "p4"] must produce TWO AddInbound commands on the entry
+    node (REALITY + P4/WS+TLS), not just the primary one - see
+    api/routes/cascades.py::create_cascade and xray_templates.py build_hopa_p4_inbound_json."""
+    entry_agent = FakeAgent()
+    try:
+        entry_node_id = await entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+
+        response = await client.post(
+            "/cascades",
+            json={"entry_node_id": entry_node_id, "exit_node_ids": [], "hop_a_presets": ["p1", "p4"]},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 201
+        cascade_id = response.json()["id"]
+
+        add_inbound_commands = [
+            c for c in entry_agent.received_commands if c.WhichOneof("op") == "add_inbound"
+        ]
+        assert len(add_inbound_commands) == 2
+
+        inbounds = [json.loads(c.add_inbound.inbound_json) for c in add_inbound_commands]
+        preset_hints = {inbound.get("_presetHint") for inbound in inbounds}
+        assert preset_hints == {"p1", "p4"}
+
+        p4_inbound = next(inbound for inbound in inbounds if inbound["_presetHint"] == "p4")
+        assert p4_inbound["streamSettings"]["network"] == "ws"
+        assert p4_inbound["streamSettings"]["security"] == "tls"
+        assert p4_inbound["tag"] != inbounds[0]["tag"]
+        assert cascade_id  # sanity: cascade was actually created despite the extra dispatch
+    finally:
+        await entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_create_cascade_without_p4_preset_dispatches_only_the_reality_inbound(
+    client: AsyncClient, seeded_admin: dict
+) -> None:
+    entry_agent = FakeAgent()
+    try:
+        entry_node_id = await entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+
+        response = await client.post(
+            "/cascades",
+            json={"entry_node_id": entry_node_id, "exit_node_ids": [], "hop_a_presets": ["p1"]},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 201
+
+        add_inbound_commands = [
+            c for c in entry_agent.received_commands if c.WhichOneof("op") == "add_inbound"
+        ]
+        assert len(add_inbound_commands) == 1
+    finally:
+        await entry_agent.close()
 
 
 @pytest.mark.asyncio

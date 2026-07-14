@@ -23,6 +23,10 @@ class NodeOut(BaseModel):
     # (only) on an entry node before a working client vless:// URI can be composed,
     # see api/routes/users.py's connection endpoint.
     public_address: str | None = None
+    # Admin-set domain for the optional P4 preset (models/node.py Node.p4_domain) -
+    # required (only) when a cascade requests the "p4" preset, see
+    # api/routes/users.py's connection endpoint.
+    p4_domain: str | None = None
 
 
 class NodeListResponse(BaseModel):
@@ -44,6 +48,7 @@ class NodePatchRequest(BaseModel):
     role: NodeRole | None = None
     label: str | None = None
     public_address: str | None = None
+    p4_domain: str | None = None
 
 
 class NodeResourceSampleOut(BaseModel):
