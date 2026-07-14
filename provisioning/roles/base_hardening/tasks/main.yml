@@ -1,0 +1,54 @@
+---
+# Порядок здесь важен и намеренно фиксирован (ТЗ-7 §5): SSH-хардненинг —
+# до какой-либо иной настройки, включая Docker/Agent (см. site.yml — эта
+# роль применяется первой). Внутри самой роли: preflight -> пользователь и
+# его SSH-ключ (иначе после отключения PasswordAuthentication можно потерять
+# доступ) -> SSH-хардненинг -> firewall -> fail2ban -> прочее хардненинг.
+
+- name: Preflight — проверка ОС и обязательных переменных
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Пользователь и SSH-ключ оператора
+  ansible.builtin.import_tasks: user.yml
+
+- name: SSH-хардненинг (ТЗ-7 §3.1)
+  ansible.builtin.import_tasks: ssh.yml
+
+- name: "Диагностика: SSH настроен"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] SSH hardening applied — port={{ ssh_port }},
+      PermitRootLogin={{ ssh_permit_root_login }},
+      PasswordAuthentication={{ ssh_password_authentication }},
+      MaxAuthTries={{ ssh_max_auth_tries }}.
+
+- name: ufw — firewall (ТЗ-7 §3.2)
+  ansible.builtin.import_tasks: firewall.yml
+
+- name: "Диагностика: firewall настроен"
+  vars:
+    role_ports_count: "{{ role_firewall_rules[role] | default([]) | length if role is defined else 0 }}"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] ufw: default deny incoming / allow outgoing,
+      allow {{ ssh_port }}/tcp (SSH). Роль-специфичных портов открыто:
+      {{ role_ports_count }} (role={{ role | default('unknown') }}) — см.
+      group_vars/entry_nodes.yml / group_vars/exit_nodes.yml за списком и
+      обоснованием (backhaul Hop B и control-plane mTLS-порт намеренно НЕ
+      входят сюда, см. те же файлы за причиной).
+
+- name: fail2ban — дополнительный слой поверх ufw (ТЗ-7 §3.3)
+  ansible.builtin.import_tasks: fail2ban.yml
+
+- name: "Диагностика: fail2ban настроен"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] fail2ban: sshd jail enabled,
+      maxretry={{ fail2ban_maxretry }}, findtime={{ fail2ban_findtime }},
+      bantime={{ fail2ban_bantime }}.
+
+- name: Автоматические security-обновления (ТЗ-7 §3.4)
+  ansible.builtin.import_tasks: updates.yml
+
+- name: Синхронизация времени — chrony (ТЗ-7 §3.4)
+  ansible.builtin.import_tasks: timesync.yml

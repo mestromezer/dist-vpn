@@ -1,0 +1,91 @@
+---
+- name: Убедиться, что источник образа указан корректно
+  ansible.builtin.assert:
+    that:
+      - agent_image_source in ['build_from_source', 'registry']
+    fail_msg: >-
+      agent_image_source должен быть 'build_from_source' или 'registry',
+      получено: {{ agent_image_source }}.
+
+- name: "Preflight (build_from_source): репозиторий и закреплённая версия заданы"
+  ansible.builtin.assert:
+    that:
+      - agent_source_git_repo | length > 0
+      - agent_source_git_ref | length > 0
+      - agent_source_git_ref not in ['main', 'master', 'HEAD']
+    fail_msg: >-
+      agent_image_source=build_from_source требует agent_source_git_repo и
+      agent_source_git_ref (тег или полный commit SHA — НЕ имя ветки,
+      ТЗ-7 §2.2 прямо запрещает паттерн "последняя версия ветки"). Передайте
+      оба явно, например:
+      -e agent_source_git_repo=... -e agent_source_git_ref=<tag-или-sha>.
+  when: agent_image_source == 'build_from_source'
+
+- name: "Preflight (registry): образ указан"
+  ansible.builtin.assert:
+    that:
+      - agent_registry_image | length > 0
+    fail_msg: >-
+      agent_image_source=registry требует agent_registry_image (например,
+      ghcr.io/<org>/dist-vpn-agent:X.Y.Z). ВНИМАНИЕ: на момент написания
+      этой роли такого образа/реестра в проекте ещё не существует — нет
+      CI/CD, который бы его публиковал (см. README). Используйте этот
+      режим, только если вы сами подготовили и опубликовали образ.
+  when: agent_image_source == 'registry'
+
+- name: Убедиться, что адрес Platform и enrollment-токен заданы через vault
+  ansible.builtin.assert:
+    that:
+      - agent_platform_address | default('') | length > 0
+      - "'CHANGE_ME' not in (agent_platform_address | default(''))"
+      - agent_enrollment_token | default('') | length > 0
+      - "'CHANGE_ME' not in (agent_enrollment_token | default(''))"
+    fail_msg: >-
+      agent_platform_address / agent_enrollment_token не заданы или
+      оставлены плейсхолдером из group_vars/all/vault.yml.example.
+      Заполните реальный group_vars/all/vault.yml (см. README «Секреты и
+      Vault») — эта роль намеренно не задаёт для них значений по
+      умолчанию (ТЗ-7 §4.3/§5: enrollment-токен — только через
+      Vault/SOPS, никогда открытым текстом).
+  no_log: true
+
+- name: Убедиться, что mTLS CA-сертификат указан либо явно включён insecure dev mode
+  ansible.builtin.assert:
+    that:
+      - (agent_mtls_ca_cert_src | length > 0) or (agent_insecure_dev_mode | bool)
+    fail_msg: >-
+      agent_mtls_ca_cert_src пуст. Agent обязан проверять серверный
+      сертификат Platform на каждом запуске
+      (agent/src/dist_vpn_agent/config.py: mtls_ca_cert_path обязателен,
+      если не включён insecure_dev_mode) — задайте на control-машине путь к
+      CA-сертификату Platform (agent_mtls_ca_cert_src), либо явно и
+      осознанно установите agent_insecure_dev_mode: true ТОЛЬКО для
+      dev/тестового окружения (agent/README.md, agent/Dockerfile:
+      "никогда не включать в production").
+  when: not agent_insecure_dev_mode
+
+- name: Предупреждение — insecure dev mode включён явно
+  ansible.builtin.debug:
+    msg: >-
+      ВНИМАНИЕ: agent_insecure_dev_mode=true — канал Agent<->Platform
+      будет БЕЗ TLS/mTLS. Разрешено только для локальной
+      разработки/тестирования (agent/README.md, agent/Dockerfile) —
+      НИКОГДА для production (ТЗ-4 §5.2, §5.5 категория A02).
+  when: agent_insecure_dev_mode | bool
+
+# agent_mtls_client_cert_src/key_src — edge-case поля (восстановление/
+# миграция уже выданной идентичности ноды, НЕ штатный enrollment — см.
+# подробное обоснование в defaults/main.yml и README, "Bootstrap mTLS
+# Agent<->Platform"). Валидация ниже не зависит от того, штатный это путь
+# или edge-case: если оператор задаёт одно из двух полей, второе обязано
+# быть задано тоже — половинчатая пара не образует рабочую TLS-идентичность.
+- name: Убедиться, что клиентский сертификат и ключ заданы либо оба, либо ни один
+  ansible.builtin.assert:
+    that:
+      - (agent_mtls_client_cert_src | length > 0) == (agent_mtls_client_key_src | length > 0)
+    fail_msg: >-
+      agent_mtls_client_cert_src и agent_mtls_client_key_src должны быть
+      заданы либо оба, либо ни один (то же правило валидации, что и в
+      agent/src/dist_vpn_agent/config.py на стороне самого Agent'а —
+      клиентский сертификат без ключа или наоборот не образует рабочую
+      TLS-идентичность).
