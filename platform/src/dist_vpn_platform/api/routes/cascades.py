@@ -141,7 +141,8 @@ async def create_cascade(
         exit_links[exit_node.id] = link
     await db.flush()
 
-    hop_a_preset = body.hop_a_presets[0] if body.hop_a_presets else "p1"
+    non_p4_presets = [p for p in body.hop_a_presets if p != "p4"]
+    hop_a_preset = non_p4_presets[0] if non_p4_presets else "p1"
 
     entry_ok = await dispatch_best_effort(
         entry_node.id,
@@ -155,6 +156,22 @@ async def create_cascade(
         ),
         context=f"cascade {cascade.id} hopa inbound",
     )
+
+    # P4 (VLESS+TLS/WebSocket, TZ-4 §3.3) is a second, simultaneous inbound alongside
+    # the REALITY one above, not a replacement - see xray_templates.py's P4 constants.
+    # Best-effort and does NOT affect cascade.status below: REALITY is the required
+    # path, P4 is an optional fallback a client only needs if REALITY is unreachable.
+    if "p4" in body.hop_a_presets:
+        p4_ok = await dispatch_best_effort(
+            entry_node.id,
+            pb.Command(
+                command_id=new_command_id(),
+                add_inbound=pb.AddInbound(inbound_json=xray.build_hopa_p4_inbound_json(cascade.id)),
+            ),
+            context=f"cascade {cascade.id} hopa p4 inbound",
+        )
+        if not p4_ok:
+            logger.warning("cascade_p4_inbound_dispatch_failed", extra={"cascade_id": cascade.id})
 
     exit_ok_count = 0
     for exit_node in exit_nodes:
@@ -183,7 +200,7 @@ async def create_cascade(
                 command_id=new_command_id(),
                 add_inbound=pb.AddInbound(
                     inbound_json=xray.build_hopb_inbound_json(
-                        cascade.id, link.hopb_reality_private_key, link.hopb_reality_short_id
+                        cascade.id, exit_node.id, link.hopb_reality_private_key, link.hopb_reality_short_id
                     )
                 ),
             ),
