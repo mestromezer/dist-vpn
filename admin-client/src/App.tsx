@@ -5,7 +5,7 @@ import CallSplitIcon from '@mui/icons-material/CallSplit';
 import PeopleIcon from '@mui/icons-material/People';
 import { dataProvider } from './dataProvider';
 import { authProvider } from './auth/authProvider';
-import { NodeList, NodeShow } from './resources/nodes';
+import { NodeEdit, NodeEnroll, NodeList, NodeShow } from './resources/nodes';
 import { CascadeList, CascadeShow } from './resources/cascades';
 import { UserCreate, UserList, UserShow } from './resources/users';
 import { TopologyPage } from './topology/TopologyPage';
@@ -25,7 +25,14 @@ function CustomLayout(props: LayoutProps) {
 function App() {
   return (
     <Admin dataProvider={dataProvider} authProvider={authProvider} layout={CustomLayout}>
-      <Resource name="nodes" list={NodeList} show={NodeShow} icon={DeviceHubIcon} />
+      <Resource
+        name="nodes"
+        list={NodeList}
+        show={NodeShow}
+        edit={NodeEdit}
+        create={NodeEnroll}
+        icon={DeviceHubIcon}
+      />
       <Resource name="cascades" list={CascadeList} show={CascadeShow} icon={CallSplitIcon} />
       <Resource
         name="users"

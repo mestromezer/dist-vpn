@@ -38,6 +38,11 @@ export interface Node {
   status: NodeStatus;
   agent_version: string;
   last_heartbeat_at: string;
+  // Admin-set public dial address (Node.public_address on Platform) - required
+  // (only) before a working client vless:// URI can be composed for an entry
+  // node. Optional/nullable: absent until an admin sets it via PATCH
+  // /nodes/{id} (see NodeEdit in resources/nodes.tsx).
+  public_address?: string | null;
 }
 
 export interface TokenPair {
