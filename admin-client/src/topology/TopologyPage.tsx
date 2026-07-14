@@ -1,35 +1,10 @@
 import { useMemo } from 'react';
 import { Background, Controls, ReactFlow } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { Alert, Box, Card, CardContent, Typography } from '@mui/material';
+import { Alert, Box, Card, CardContent, Chip, Typography } from '@mui/material';
 import { Title } from 'react-admin';
-import { authorizedFetchJson } from '../auth/httpClient';
-import type { Cascade, Node } from '../contract/types';
 import { buildTopologyGraph } from './graph';
-import { usePolling } from './usePolling';
-
-const POLL_INTERVAL_MS = 5000;
-// Large enough to cover the pool size expected for this slice without
-// needing pagination in the graph itself; GET /cascades isn't paginated in
-// the contract at all (no page/page_size params), so it always returns the
-// full list.
-const NODES_PAGE_SIZE = 500;
-
-interface TopologySnapshot {
-  nodes: Node[];
-  cascades: Cascade[];
-}
-
-async function fetchTopologySnapshot(): Promise<TopologySnapshot> {
-  const [nodesResponse, cascadesResponse] = await Promise.all([
-    authorizedFetchJson<{ items?: Node[] }>(`/nodes?page_size=${NODES_PAGE_SIZE}`),
-    authorizedFetchJson<{ items?: Cascade[] }>('/cascades'),
-  ]);
-  return {
-    nodes: nodesResponse.body.items ?? [],
-    cascades: cascadesResponse.body.items ?? [],
-  };
-}
+import { useLiveTopologySnapshot } from './liveTopology';
 
 /**
  * Real cascade topology graph (TZ-6 §3.1), replacing the earlier placeholder.
@@ -39,12 +14,16 @@ async function fetchTopologySnapshot(): Promise<TopologySnapshot> {
  * color/dash-pattern/label both encode status so "где обрывается
  * соединение" (TZ-6 §3.1) is visible at a glance, not just on hover.
  *
- * Data comes from polling GET /nodes and GET /cascades on an interval
- * (usePolling) rather than a live WebSocket push — Platform's `/events`
- * WS channel (TZ-6 §2) isn't implemented yet. See README.md TODO.
+ * Data source: `useLiveTopologySnapshot` (topology/liveTopology.ts) — a live
+ * `WS /events` push once that connection proves stable, with the previous
+ * slice's GET /nodes + GET /cascades polling kept as the always-on initial
+ * load and the automatic fallback if the socket isn't available or drops.
+ * See that file and README.md for exactly what's been cross-checked against
+ * Platform's real (non-stub) `/events` source vs. still unconfirmed by an
+ * actual live click-through in a browser.
  */
 export function TopologyPage() {
-  const { data, error, loading } = usePolling(fetchTopologySnapshot, POLL_INTERVAL_MS);
+  const { data, error, loading, source } = useLiveTopologySnapshot();
 
   const { nodes: flowNodes, edges: flowEdges } = useMemo(
     () => buildTopologyGraph(data?.nodes ?? [], data?.cascades ?? []),
@@ -61,10 +40,24 @@ export function TopologyPage() {
           is up, dashed orange is degraded, animated dashed red is down —
           i.e. exactly where the connection currently breaks.
         </Typography>
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
-          Refreshed every {POLL_INTERVAL_MS / 1000}s by polling GET /nodes and
-          GET /cascades (interim mechanism for this slice — live push over
-          Platform&apos;s WS /events channel is still TODO, see README.md).
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}
+        >
+          {source === 'websocket' ? (
+            <>
+              <Chip label="Live (WebSocket)" color="success" size="small" />
+              Updating in real time over WS /events.
+            </>
+          ) : (
+            <>
+              <Chip label="Polling" color="default" size="small" />
+              Refreshed every 5s via GET /nodes + GET /cascades — WS /events
+              is unavailable, connecting, or not yet implemented server-side
+              (see README.md).
+            </>
+          )}
         </Typography>
         {error && (
           <Alert severity="warning" sx={{ mb: 2 }}>

@@ -1,5 +1,6 @@
 import type { AuthProvider } from 'react-admin';
 import type { ChangePasswordRequest, LoginRequest, TokenPair } from '../contract/types';
+import { closeSharedEventsSocket } from '../realtime/eventsSocket';
 import { API_URL, authorizedFetchJson } from './httpClient';
 import {
   clearMustChangePassword,
@@ -53,6 +54,13 @@ export const authProvider: AuthProvider = {
     const accessToken = getAccessToken();
     const refreshToken = getRefreshToken();
     clearTokens();
+    // Stop the shared /events socket too — see eventsSocket.ts's
+    // closeSharedEventsSocket doc comment: without this, a cleared/absent
+    // token would leave a reconnect loop spinning against an endpoint it can
+    // no longer authenticate to, and the next login would otherwise reuse a
+    // connection primed with the old (now-invalid) token in its
+    // last-attempted URL.
+    closeSharedEventsSocket();
     if (accessToken) {
       try {
         // Per the contract update clarifying /auth/logout (see contract/types.ts
@@ -86,6 +94,7 @@ export const authProvider: AuthProvider = {
   checkError: async (error: { status?: number }) => {
     if (error?.status === 401 || error?.status === 403) {
       clearTokens();
+      closeSharedEventsSocket();
       throw new Error('Session expired');
     }
   },
