@@ -10,6 +10,7 @@ import {
 } from 'react-admin';
 import Chip from '@mui/material/Chip';
 import type { Cascade, CascadeStatus } from '../contract/types';
+import { TestHistoryList } from './TestHistoryList';
 import { TestRequestButton } from './TestRequestButton';
 
 // exit_node_ids / hop_a_presets are plain string[] in the contract (not
@@ -77,6 +78,7 @@ export function CascadeShow() {
           render={(record) => joinedList(record.hop_a_presets)}
         />
         <TestRequestButton />
+        <TestHistoryList />
       </SimpleShowLayout>
     </Show>
   );
