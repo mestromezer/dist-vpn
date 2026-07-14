@@ -23,6 +23,7 @@ PATCH /cascades/{id} and GET /cascades/{id}/events remain out of scope for this 
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func, select
@@ -47,11 +48,12 @@ from dist_vpn_platform.schemas.cascades import (
     CascadeMigrateUsersResponse,
     CascadeOut,
 )
+from dist_vpn_platform.schemas.health_events import HealthEventOut
 from dist_vpn_platform.schemas.tests import LinkTestListResponse, LinkTestOut, LinkTestStartResponse
 from dist_vpn_platform.security import reality_keys
 from dist_vpn_platform.services import link_tests
 from dist_vpn_platform.services import xray_templates as xray
-from dist_vpn_platform.services.event_bus import publish_health_event
+from dist_vpn_platform.services.event_bus import publish_cascade_event, publish_health_event
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("dist_vpn_platform.audit")
@@ -220,13 +222,7 @@ async def create_cascade(
     db.add(health_event)
     await db.commit()
 
-    publish_health_event(health_event)  # TZ-5 §4.3: push to WS /events subscribers
-    audit_logger.info(
-        "cascade_created",
-        extra={"admin_id": admin.id, "cascade_id": cascade.id, "status": cascade.status.value},
-    )
-
-    return CascadeOut(
+    cascade_out = CascadeOut(
         id=cascade.id,
         entry_node_id=cascade.entry_node_id,
         exit_node_ids=[n.id for n in exit_nodes],
@@ -235,6 +231,18 @@ async def create_cascade(
         hopa_reality_public_key=cascade.hopa_reality_public_key,
         hopa_reality_short_id=cascade.hopa_reality_short_id,
     )
+
+    publish_health_event(health_event)  # TZ-5 §4.3: push to WS /events subscribers
+    # Also the full Cascade snapshot, not just the HealthEvent row - see
+    # event_bus.py::publish_cascade_event's docstring for why the health_event alone
+    # was never enough for Admin Client to render a brand-new cascade live.
+    publish_cascade_event(cascade_out)
+    audit_logger.info(
+        "cascade_created",
+        extra={"admin_id": admin.id, "cascade_id": cascade.id, "status": cascade.status.value},
+    )
+
+    return cascade_out
 
 
 @router.get("/{cascade_id}", response_model=CascadeOut)
@@ -424,11 +432,30 @@ async def migrate_cascade_users(
     )
 
 
-@router.get("/{cascade_id}/events")
-async def list_cascade_events(cascade_id: str, _admin: AdminAccount = Depends(require_admin)) -> None:
-    # TODO: cheap to implement against the existing HealthEvent table (rows are
-    # already written on cascade create/delete above) - not requested for this slice.
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, _NOT_IMPLEMENTED)
+@router.get("/{cascade_id}/events", response_model=list[HealthEventOut])
+async def list_cascade_events(
+    cascade_id: str,
+    since: datetime | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    _admin: AdminAccount = Depends(require_admin),
+) -> list[HealthEventOut]:
+    """Journal of this cascade's status transitions (TZ-5 §4.3 "что и где отвалилось")
+    - HealthEvent rows already exist (written on create/delete/migrate-users/
+    health_scheduler timeout, published to WS /events as they happen) - this endpoint
+    is the pull/history counterpart to that push. Bare array + `since` filter, per
+    the contract's own original shape (contracts/rest/openapi.yaml) - unlike several
+    other additive endpoints in this file, this path's shape was specified from the
+    start, not something this slice is free to invent an items+total envelope for."""
+    cascade = await db.get(Cascade, cascade_id)
+    if cascade is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Cascade not found")
+
+    stmt = select(HealthEvent).where(HealthEvent.cascade_id == cascade_id).order_by(HealthEvent.occurred_at.desc())
+    if since is not None:
+        stmt = stmt.where(HealthEvent.occurred_at >= since)
+    items = (await db.execute(stmt)).scalars().all()
+
+    return [HealthEventOut.model_validate(item) for item in items]
 
 
 @router.post("/{cascade_id}/test", status_code=status.HTTP_202_ACCEPTED, response_model=LinkTestStartResponse)

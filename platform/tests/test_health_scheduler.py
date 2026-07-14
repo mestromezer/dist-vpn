@@ -39,7 +39,7 @@ async def test_stale_healthy_node_is_marked_down(db_engine: None) -> None:
         await db.flush()
         node_id = node.id
 
-    events = await check_node_timeouts()
+    result = await check_node_timeouts()
 
     async with session_scope() as db:
         node = await db.get(Node, node_id)
@@ -52,7 +52,8 @@ async def test_stale_healthy_node_is_marked_down(db_engine: None) -> None:
         assert rows[0].from_status == "healthy"
         assert rows[0].to_status == "down"
 
-    assert any(e.node_id == node_id for e in events)
+    assert any(e.node_id == node_id for e in result.events)
+    assert result.down_cascades == []  # no cascades on this node at all
 
 
 @pytest.mark.asyncio
@@ -106,9 +107,9 @@ async def test_already_down_node_is_not_re_flagged(db_engine: None) -> None:
         await db.flush()
         node_id = node.id
 
-    events = await check_node_timeouts()
+    result = await check_node_timeouts()
 
-    assert not any(e.node_id == node_id for e in events)
+    assert not any(e.node_id == node_id for e in result.events)
 
 
 @pytest.mark.asyncio
@@ -130,16 +131,24 @@ async def test_stale_entry_node_marks_its_cascades_down_too(db_engine: None) -> 
         await db.flush()
         entry_id, up_cascade_id, already_down_id = entry.id, up_cascade.id, already_down_cascade.id
 
-    events = await check_node_timeouts()
+    result = await check_node_timeouts()
 
     async with session_scope() as db:
         up_cascade = await db.get(Cascade, up_cascade_id)
         assert up_cascade.status == CascadeStatus.DOWN
 
-    cascade_event_ids = {e.cascade_id for e in events if e.cascade_id}
+    cascade_event_ids = {e.cascade_id for e in result.events if e.cascade_id}
     assert up_cascade_id in cascade_event_ids
     # Already-DOWN cascade must not get a redundant/duplicate transition event.
     assert already_down_id not in cascade_event_ids
+
+    # A real CascadeOut snapshot too, not just the HealthEvent row - see
+    # event_bus.py::publish_cascade_event for why the topology graph needs both.
+    down_cascade_ids = {c.id for c in result.down_cascades}
+    assert down_cascade_ids == {up_cascade_id}
+    snapshot = next(c for c in result.down_cascades if c.id == up_cascade_id)
+    assert snapshot.status == CascadeStatus.DOWN
+    assert snapshot.entry_node_id == entry_id
 
 
 @pytest.mark.asyncio
@@ -162,7 +171,7 @@ async def test_stale_exit_node_does_not_mark_cascades_down(db_engine: None) -> N
         await db.flush()
         cascade_id, exit_node_id = cascade.id, exit_node.id
 
-    events = await check_node_timeouts()
+    result = await check_node_timeouts()
 
     async with session_scope() as db:
         cascade = await db.get(Cascade, cascade_id)
@@ -171,4 +180,5 @@ async def test_stale_exit_node_does_not_mark_cascades_down(db_engine: None) -> N
         exit_node = await db.get(Node, exit_node_id)
         assert exit_node.status == NodeStatus.DOWN  # the exit node itself is still correctly flagged
 
-    assert not any(e.cascade_id == cascade_id for e in events)
+    assert not any(e.cascade_id == cascade_id for e in result.events)
+    assert result.down_cascades == []

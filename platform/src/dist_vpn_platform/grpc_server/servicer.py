@@ -33,12 +33,13 @@ from datetime import datetime, timezone
 
 import grpc
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from dist_vpn_platform.db import session_scope
 from dist_vpn_platform.generated import agent_control_pb2 as pb
 from dist_vpn_platform.generated import agent_control_pb2_grpc as pb_grpc
 from dist_vpn_platform.models.base import as_aware_utc
-from dist_vpn_platform.models.cascade import Cascade
+from dist_vpn_platform.models.cascade import Cascade, CascadeStatus
 from dist_vpn_platform.models.enrollment_token import EnrollmentToken
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
@@ -46,10 +47,11 @@ from dist_vpn_platform.models.node_resource_sample import NodeResourceSample
 from dist_vpn_platform.models.usage_stat import UsageStat
 from dist_vpn_platform.models.user import User, UserCascade
 from dist_vpn_platform.models.user_device_kick_event import UserDeviceKickEvent
+from dist_vpn_platform.schemas.cascades import CascadeOut
 from dist_vpn_platform.security import mtls_ca
 from dist_vpn_platform.security.enrollment_tokens import hash_token
 from dist_vpn_platform.services import xray_templates as xray
-from dist_vpn_platform.services.event_bus import publish_health_event
+from dist_vpn_platform.services.event_bus import publish_cascade_event, publish_health_event
 
 logger = logging.getLogger(__name__)
 
@@ -356,12 +358,15 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             return pb.EnrollmentAck(node_id=node.id, accepted=True, mtls_client_cert_pem=client_cert_pem)
 
     async def _handle_heartbeat(self, heartbeat: pb.Heartbeat) -> None:
-        # `event` is published only after the transaction below actually commits (see
-        # the `async with` block's exit) - same publish-after-commit ordering as
-        # api/routes/cascades.py::create_cascade and api/routes/nodes.py::decommission_
-        # node, so a WS /events subscriber is never notified about a status change that
-        # a concurrent rollback could still discard.
+        # `event`/`cascade_events`/`recovered_cascades` are published only after the
+        # transaction below actually commits (see the `async with` block's exit) -
+        # same publish-after-commit ordering as api/routes/cascades.py::create_cascade
+        # and api/routes/nodes.py::decommission_node, so a WS /events subscriber is
+        # never notified about a status change that a concurrent rollback could still
+        # discard.
         event: HealthEvent | None = None
+        cascade_events: list[HealthEvent] = []
+        recovered_cascades: list[Cascade] = []
 
         async with session_scope() as db:
             node = await db.get(Node, heartbeat.node_id)
@@ -432,8 +437,54 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
                     extra={"node_id": node.id, "from": previous_status.value, "to": node.status.value},
                 )
 
+                # Cascade recovery: a real, previously-missing counterpart to
+                # services/health_scheduler.py's DOWN-marking - that module's own
+                # docstring says "recovery is handled reactively by _handle_heartbeat",
+                # which was true for the *node*, but nothing here ever actually
+                # touched a DOWN *cascade*'s status before this fix - it would have
+                # stayed DOWN forever even after its entry node came back HEALTHY.
+                # Only entry nodes: exit-node health doesn't drive Cascade.status at
+                # all (Hop B failover is Xray's own balancer's job, not Platform's -
+                # same reasoning as health_scheduler.py's DOWN-marking side).
+                if node.status == NodeStatus.HEALTHY and node.role == NodeRole.ENTRY:
+                    down_cascades = (
+                        await db.execute(
+                            select(Cascade)
+                            .options(selectinload(Cascade.exit_links))
+                            .where(Cascade.entry_node_id == node.id, Cascade.status == CascadeStatus.DOWN)
+                        )
+                    ).scalars().all()
+                    for cascade in down_cascades:
+                        cascade.status = CascadeStatus.UP
+                        cascade_events.append(
+                            HealthEvent(
+                                cascade_id=cascade.id,
+                                from_status=CascadeStatus.DOWN.value,
+                                to_status=CascadeStatus.UP.value,
+                                reason=f"entry node {node.id} heartbeat resumed",
+                            )
+                        )
+                        recovered_cascades.append(cascade)
+                    for cascade_event in cascade_events:
+                        db.add(cascade_event)
+                    await db.flush()
+
         if event is not None:
             publish_health_event(event)  # TZ-5 §4.3: push to WS /events subscribers
+        for cascade_event in cascade_events:
+            publish_health_event(cascade_event)
+        for cascade in recovered_cascades:
+            publish_cascade_event(
+                CascadeOut(
+                    id=cascade.id,
+                    entry_node_id=cascade.entry_node_id,
+                    exit_node_ids=cascade.exit_node_ids,
+                    status=cascade.status,
+                    hop_a_presets=cascade.hop_a_presets,
+                    hopa_reality_public_key=cascade.hopa_reality_public_key,
+                    hopa_reality_short_id=cascade.hopa_reality_short_id,
+                )
+            )
 
     async def _handle_telemetry(self, telemetry: pb.TelemetryReport) -> None:
         """Persist TelemetryReport.counters into UsageStat rows (TZ-5 §4.4/§6.4 - byte

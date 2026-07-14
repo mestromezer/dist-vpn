@@ -8,37 +8,47 @@ limitation, see platform/README.md TODO section) - introducing a new infra depen
 project's current scope, not a correctness requirement.
 
 Everything reactive (a real Heartbeat arriving) was already handled before this module
-existed - Node/Cascade recovering to HEALTHY/UP on the next real heartbeat
-(grpc_server/servicer.py::_handle_heartbeat). What was missing, and this module closes,
-is the *passive* side: nothing ever noticed a node that had simply gone silent (Agent
-crashed, VDS lost power, network partition) - status only ever changed in reaction to
-an incoming message, never from an incoming message's *absence*.
+existed - Node recovering to HEALTHY on the next real heartbeat
+(grpc_server/servicer.py::_handle_heartbeat). Cascade recovery (DOWN -> UP once its
+entry node's heartbeat resumes) is also handled there, in the same method - added
+alongside this module rather than before it, since a DOWN cascade was itself a new
+concept this module introduced; there was nothing to recover from previously. What
+this module closes is the *passive* side: nothing ever noticed a node that had simply
+gone silent (Agent crashed, VDS lost power, network partition) - status only ever
+changed in reaction to an incoming message, never from an incoming message's *absence*.
 """
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from dist_vpn_platform.config import settings
 from dist_vpn_platform.db import session_scope
 from dist_vpn_platform.models.cascade import Cascade, CascadeStatus
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
-from dist_vpn_platform.services.event_bus import publish_health_event
+from dist_vpn_platform.schemas.cascades import CascadeOut
+from dist_vpn_platform.services.event_bus import publish_cascade_event, publish_health_event
 
 logger = logging.getLogger(__name__)
 
 
-async def check_node_timeouts() -> list[HealthEvent]:
+@dataclasses.dataclass(frozen=True)
+class TimeoutCheckResult:
+    events: list[HealthEvent]
+    down_cascades: list[CascadeOut]
+
+
+async def check_node_timeouts() -> TimeoutCheckResult:
     """One pass: mark any node whose last_heartbeat_at is older than
     settings.node_heartbeat_timeout_seconds as DOWN, and any cascade whose entry node
-    just went DOWN as DOWN too (symmetric with _handle_heartbeat's own reactive
-    DOWN/DEGRADED -> HEALTHY recovery transition - that one still fires normally once
-    the Agent reconnects and sends a real heartbeat again, this module doesn't touch
-    recovery at all, only the missed-heartbeat -> DOWN direction).
+    just went DOWN as DOWN too. Recovery is NOT this module's concern - see the module
+    docstring for where that lives.
 
     ENROLLING nodes are deliberately excluded - a node that has never sent its first
     heartbeat at all hasn't "timed out" in the same sense a previously-healthy node
@@ -48,10 +58,14 @@ async def check_node_timeouts() -> list[HealthEvent]:
     Returns the HealthEvents written this pass (already committed) so the caller can
     publish them to WS /events - same publish-after-commit ordering already used by
     _handle_heartbeat/create_cascade/decommission_node, so a WS subscriber never learns
-    about a transition a concurrent rollback could still have discarded.
+    about a transition a concurrent rollback could still have discarded - plus a full
+    CascadeOut snapshot per newly-DOWN cascade, for the same "a topology graph needs
+    more than just the HealthEvent row to render the change" reason documented on
+    event_bus.py::publish_cascade_event.
     """
     threshold = datetime.now(timezone.utc) - timedelta(seconds=settings.node_heartbeat_timeout_seconds)
     events: list[HealthEvent] = []
+    down_cascades: list[CascadeOut] = []
 
     async with session_scope() as db:
         stale_nodes = (
@@ -83,10 +97,9 @@ async def check_node_timeouts() -> list[HealthEvent]:
             if node.role == NodeRole.ENTRY:
                 affected_cascades = (
                     await db.execute(
-                        select(Cascade).where(
-                            Cascade.entry_node_id == node.id,
-                            Cascade.status != CascadeStatus.DOWN,
-                        )
+                        select(Cascade)
+                        .options(selectinload(Cascade.exit_links))
+                        .where(Cascade.entry_node_id == node.id, Cascade.status != CascadeStatus.DOWN)
                     )
                 ).scalars().all()
                 for cascade in affected_cascades:
@@ -100,10 +113,21 @@ async def check_node_timeouts() -> list[HealthEvent]:
                     )
                     db.add(cascade_event)
                     events.append(cascade_event)
+                    down_cascades.append(
+                        CascadeOut(
+                            id=cascade.id,
+                            entry_node_id=cascade.entry_node_id,
+                            exit_node_ids=cascade.exit_node_ids,
+                            status=cascade.status,
+                            hop_a_presets=cascade.hop_a_presets,
+                            hopa_reality_public_key=cascade.hopa_reality_public_key,
+                            hopa_reality_short_id=cascade.hopa_reality_short_id,
+                        )
+                    )
 
         await db.flush()
 
-    return events
+    return TimeoutCheckResult(events=events, down_cascades=down_cascades)
 
 
 async def run_health_scheduler_forever() -> None:
@@ -114,9 +138,11 @@ async def run_health_scheduler_forever() -> None:
     heartbeat-loop error handling."""
     while True:
         try:
-            events = await check_node_timeouts()
-            for event in events:
+            result = await check_node_timeouts()
+            for event in result.events:
                 publish_health_event(event)
+            for cascade_out in result.down_cascades:
+                publish_cascade_event(cascade_out)
         except asyncio.CancelledError:
             raise
         except Exception:

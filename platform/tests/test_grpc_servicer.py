@@ -131,6 +131,60 @@ async def test_heartbeat_transitions_enrolling_to_healthy(db_engine: None) -> No
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_recovers_down_cascade_on_entry_node(db_engine: None) -> None:
+    """Real bug fix, not a hypothetical: services/health_scheduler.py can mark a
+    cascade DOWN (entry node heartbeat timeout), but nothing ever flipped it back to
+    UP when the entry node's heartbeat resumed - it would have stayed DOWN forever.
+    _handle_heartbeat now does this itself, in the same place it already recovers the
+    Node's own status."""
+    plaintext = await _seed_enrollment_token()
+    servicer = AgentControlServicer()
+    ack = await servicer._handle_enrollment(
+        pb.Enrollment(enrollment_token=plaintext, requested_role=pb.NODE_ROLE_ENTRY, csr_pem=generate_test_csr_pem()),
+        peer="test-peer",
+    )
+
+    async with session_scope() as db:
+        node = await db.get(Node, ack.node_id)
+        node.status = NodeStatus.DOWN  # simulate a prior health_scheduler timeout
+        cascade = Cascade(entry_node_id=ack.node_id, status=CascadeStatus.DOWN)
+        already_up_cascade = Cascade(entry_node_id=ack.node_id, status=CascadeStatus.UP)
+        db.add(cascade)
+        db.add(already_up_cascade)
+        await db.flush()
+        cascade_id, already_up_id = cascade.id, already_up_cascade.id
+
+    await servicer._handle_heartbeat(
+        pb.Heartbeat(
+            node_id=ack.node_id,
+            health=pb.NodeHealth(xray_container_running=True, cpu_percent=1.0, mem_percent=1.0, disk_percent=1.0),
+            timestamp_unix=int(time.time()),
+        )
+    )
+
+    async with session_scope() as db:
+        node = await db.get(Node, ack.node_id)
+        assert node.status == NodeStatus.HEALTHY
+
+        cascade = await db.get(Cascade, cascade_id)
+        assert cascade.status == CascadeStatus.UP
+
+        cascade_events = (
+            await db.execute(select(HealthEvent).where(HealthEvent.cascade_id == cascade_id))
+        ).scalars().all()
+        assert len(cascade_events) == 1
+        assert cascade_events[0].from_status == "down"
+        assert cascade_events[0].to_status == "up"
+
+        # An already-UP cascade on the same node must not get a spurious duplicate
+        # transition event just because the node itself also recovered.
+        already_up_events = (
+            await db.execute(select(HealthEvent).where(HealthEvent.cascade_id == already_up_id))
+        ).scalars().all()
+        assert already_up_events == []
+
+
+@pytest.mark.asyncio
 async def test_telemetry_persists_usage_stats_and_resolves_known_user(db_engine: None) -> None:
     plaintext = await _seed_enrollment_token()
     servicer = AgentControlServicer()

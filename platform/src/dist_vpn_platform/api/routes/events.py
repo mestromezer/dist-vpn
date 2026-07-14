@@ -6,9 +6,12 @@ without a manual page refresh"): every connected client is subscribed to
 services/event_bus.py's in-process broadcast bus and receives, as JSON, every
 HealthEvent created (node/cascade state transitions - see event_bus.py's
 publish_health_event() call sites: grpc_server/servicer.py heartbeat handling,
-api/routes/nodes.py decommission, api/routes/cascades.py cascade creation) and every
-LinkTest that resolves (services/link_tests.py::_resolve(), the follow-up to
-POST /cascades/{id}/test - see api/routes/cascades.py::start_cascade_test).
+api/routes/nodes.py decommission, api/routes/cascades.py cascade creation), every full
+Cascade snapshot published on creation/DOWN/recovery (publish_cascade_event() - added
+after Admin Client work found a health_event alone doesn't carry enough for a client
+to render a brand-new cascade on a live topology graph), and every LinkTest that
+resolves (services/link_tests.py::_resolve(), the follow-up to POST /cascades/{id}/test
+- see api/routes/cascades.py::start_cascade_test).
 
 Single Platform process only - see event_bus.py's module docstring for the documented
 multi-replica follow-up (Redis pub/sub).

@@ -14,10 +14,13 @@ which replica handled the underlying gRPC/HTTP call - out of scope for this slic
 platform/README.md TODO.
 
 Message envelope matches contracts/rest/openapi.yaml's bottom-of-file WS description:
-JSON wrapping one of HealthEvent / Cascade / LinkTest. This slice publishes the first
-and last of those three (`type: "health_event"` and `type: "link_test"`); a `type:
-"cascade"` message (pushing Cascade.status transitions directly, rather than only the
-HealthEvent row logged alongside them) is not wired up yet - also a follow-up TODO.
+JSON wrapping one of HealthEvent / Cascade / LinkTest. All three are published now
+(`type: "health_event"`, `type: "cascade"`, `type: "link_test"`) - `type: "cascade"`
+was a documented gap until Admin Client work found the real consequence: a newly
+created cascade never appeared on the live topology graph at all, because the
+health_event published alongside it carries no entry_node_id/exit_node_ids for the
+client to reconstruct the new cascade's shape from - only a real Cascade snapshot
+does. See publish_cascade_event() below for every call site that now sends one.
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from dist_vpn_platform.models.health_event import HealthEvent
     from dist_vpn_platform.models.link_test import LinkTest
+    from dist_vpn_platform.schemas.cascades import CascadeOut
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +86,23 @@ def publish_health_event(event: "HealthEvent") -> None:
     from dist_vpn_platform.schemas.health_events import HealthEventOut
 
     event_bus.publish({"type": "health_event", "data": HealthEventOut.model_validate(event).model_dump(mode="json")})
+
+
+def publish_cascade_event(cascade_out: "CascadeOut") -> None:
+    """Broadcast a full Cascade snapshot - not just the HealthEvent row logged
+    alongside a status change - to every WS /events subscriber. Call sites: cascade
+    creation (api/routes/cascades.py::create_cascade), a cascade going DOWN by
+    heartbeat timeout (services/health_scheduler.py::check_node_timeouts), and a
+    cascade recovering back to UP when its entry node's heartbeat resumes
+    (grpc_server/servicer.py::_handle_heartbeat) - every place Cascade.status
+    actually changes, publish both the HealthEvent (history/audit trail) and this
+    (so a live topology graph can render the change without a reload/poll).
+
+    Takes an already-built CascadeOut, not a raw Cascade ORM object, deliberately -
+    every call site already needs one for its own HTTP response or already loaded
+    Cascade.exit_links eagerly for another reason, so building it once and reusing it
+    here avoids a second query and any lazy-load-in-async-context risk."""
+    event_bus.publish({"type": "cascade", "data": cascade_out.model_dump(mode="json")})
 
 
 def publish_link_test_resolved(link_test: "LinkTest") -> None:

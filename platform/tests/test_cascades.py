@@ -4,6 +4,7 @@ fake Agents (see tests/grpc_test_helpers.py::FakeAgent)."""
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
@@ -329,6 +330,69 @@ async def test_migrate_users_missing_target_cascade_is_404(client: AsyncClient, 
         assert response.status_code == 404
     finally:
         await entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_list_cascade_events_returns_creation_and_migration_history(
+    client: AsyncClient, seeded_admin: dict
+) -> None:
+    entry_agent = FakeAgent()
+    other_entry_agent = FakeAgent()
+    try:
+        entry_id = await entry_agent.connect(NodeRole.ENTRY)
+        other_entry_id = await other_entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+        cascade_id = await _create_cascade(client, token, entry_id)
+        other_cascade_id = await _create_cascade(client, token, other_entry_id)
+
+        # A second cascade's own creation event must not leak into the first
+        # cascade's history.
+        response = await client.get(f"/cascades/{cascade_id}/events", headers=_auth_headers(token))
+        assert response.status_code == 200
+        events = response.json()
+        assert len(events) == 1
+        assert events[0]["cascade_id"] == cascade_id
+        assert events[0]["to_status"] == "up"
+        assert events[0]["from_status"] == "down"
+
+        # migrate-users (even with zero users to move) doesn't itself write a
+        # HealthEvent - this just confirms the endpoint reflects real, ongoing
+        # activity rather than only ever showing the single creation row.
+        await client.post(
+            f"/cascades/{cascade_id}/migrate-users",
+            json={"to_cascade_id": other_cascade_id},
+            headers=_auth_headers(token),
+        )
+        unaffected_response = await client.get(f"/cascades/{cascade_id}/events", headers=_auth_headers(token))
+        assert len(unaffected_response.json()) == 1
+    finally:
+        await entry_agent.close()
+        await other_entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_list_cascade_events_since_filter(client: AsyncClient, seeded_admin: dict) -> None:
+    entry_agent = FakeAgent()
+    try:
+        entry_id = await entry_agent.connect(NodeRole.ENTRY)
+        token = await _login(client, seeded_admin)
+        cascade_id = await _create_cascade(client, token, entry_id)
+
+        future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        response = await client.get(
+            f"/cascades/{cascade_id}/events", params={"since": future}, headers=_auth_headers(token)
+        )
+        assert response.status_code == 200
+        assert response.json() == []
+    finally:
+        await entry_agent.close()
+
+
+@pytest.mark.asyncio
+async def test_list_cascade_events_missing_cascade_is_404(client: AsyncClient, seeded_admin: dict) -> None:
+    token = await _login(client, seeded_admin)
+    response = await client.get("/cascades/does-not-exist/events", headers=_auth_headers(token))
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
