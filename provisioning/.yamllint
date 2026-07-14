@@ -1,5 +1,13 @@
 ---
 extends: default
+
+# collections/ is a locally-installed dependency (ansible-galaxy collection
+# install -r requirements.yml, per ansible.cfg's collections_path) - already
+# gitignored (see .gitignore), not this project's own code, and not ours to
+# hold to this file's style rules. Reusing .gitignore here (rather than
+# repeating the pattern) keeps the two in sync by construction.
+ignore-from-file: [.gitignore]
+
 rules:
   # Комментарии на русском часто длиннее 80 символов — не считаем это дефектом.
   line-length: disable
