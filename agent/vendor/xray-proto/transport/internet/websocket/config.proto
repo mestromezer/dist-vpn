@@ -1,0 +1,22 @@
+// Vendored, unmodified, from https://github.com/XTLS/Xray-core, path `transport/internet/websocket/config.proto`,
+// tag v26.7.11 (commit 50231eaff98ccc31b5cbd247a721c16e97fe5ec1). See ../../README.md in this vendor
+// directory for why this file is here and the full file list/rationale.
+// Do not hand-edit -- re-run agent/scripts/gen_proto.sh's vendor-refresh
+// step (see that script) to update from upstream instead.
+
+syntax = "proto3";
+
+package xray.transport.internet.websocket;
+option csharp_namespace = "Xray.Transport.Internet.Websocket";
+option go_package = "github.com/xtls/xray-core/transport/internet/websocket";
+option java_package = "com.xray.transport.internet.websocket";
+option java_multiple_files = true;
+
+message Config {
+  string host = 1;
+  string path = 2; // URL path to the WebSocket service. Empty value means root(/).
+  map<string, string> header = 3;
+  bool accept_proxy_protocol = 4;
+  uint32 ed = 5;
+  uint32 heartbeatPeriod = 6;
+}

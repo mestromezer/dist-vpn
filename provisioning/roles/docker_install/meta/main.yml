@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  role_name: docker_install
+  description: >-
+    Установка Docker CE из официального apt-репозитория Docker (не
+    дистрибутивного пакета) на Debian/Ubuntu. См. docs/TZ-7-vds-provisioning.md §3.4.
+  license: proprietary
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
+  galaxy_tags:
+    - docker
+dependencies: []

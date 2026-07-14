@@ -1,0 +1,53 @@
+---
+- name: Убедиться, что публичный SSH-ключ оператора передан
+  ansible.builtin.assert:
+    that:
+      - provision_user_ssh_public_key | default('') | length > 0
+    fail_msg: >-
+      provision_user_ssh_public_key пуст (group_vars/all/main.yml). Передайте
+      публичный SSH-ключ оператора явно, например:
+      -e "provision_user_ssh_public_key=$(cat ~/.ssh/id_ed25519.pub)". Без
+      него после отключения PasswordAuthentication доступ к ноде будет
+      потерян — задача осознанно останавливается здесь, а не продолжает.
+
+- name: "Создать sudo-пользователя для повседневной работы: {{ provision_user }}"
+  ansible.builtin.user:
+    name: "{{ provision_user }}"
+    groups: "{{ provision_user_groups }}"
+    append: true
+    shell: "{{ provision_user_shell }}"
+    password: "{{ provision_user_password_hash if (provision_user_password_hash | default('') | length > 0) else omit }}"
+    update_password: on_create
+    state: present
+    create_home: true
+
+- name: Создать ~/.ssh для пользователя
+  ansible.builtin.file:
+    path: "/home/{{ provision_user }}/.ssh"
+    state: directory
+    owner: "{{ provision_user }}"
+    group: "{{ provision_user }}"
+    mode: "0700"
+
+- name: Добавить публичный ключ оператора в authorized_keys
+  ansible.posix.authorized_key:
+    user: "{{ provision_user }}"
+    key: "{{ provision_user_ssh_public_key }}"
+    state: present
+    exclusive: false
+
+- name: "Разрешить sudo без пароля для {{ provision_user }} (если включено)"
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/90-{{ provision_user }}-nopasswd"
+    content: "{{ provision_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+  when: provision_user_nopasswd_sudo | bool
+
+- name: Убрать nopasswd sudoers-файл, если опция выключена в конфиге
+  ansible.builtin.file:
+    path: "/etc/sudoers.d/90-{{ provision_user }}-nopasswd"
+    state: absent
+  when: not (provision_user_nopasswd_sudo | bool)

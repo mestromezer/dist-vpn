@@ -1,0 +1,10 @@
+---
+# ansible-lint не удалось запустить в песочнице разработки (см. README →
+# "Что реально проверено в этой песочнице") — Ansible controller официально
+# не поддерживает Windows без WSL/Linux. Конфигурация ниже задокументирована
+# для того, кто запустит `ansible-lint` на реальной Linux/macOS/WSL
+# control-машине или в CI.
+profile: production
+exclude_paths:
+  - .cache/
+  - collections/

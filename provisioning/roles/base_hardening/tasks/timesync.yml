@@ -1,0 +1,18 @@
+---
+# chrony важен для корректности проверки TLS-сертификатов (mTLS Agent↔Platform,
+# ТЗ-4 §5.2) и меток времени в логах (ТЗ-7 §3.4). Установка chrony на
+# Debian/Ubuntu сама вытесняет systemd-timesyncd (штатное поведение пакета).
+- name: Установить chrony
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: chrony_enabled | bool
+
+- name: Включить и запустить chrony
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started
+  when: chrony_enabled | bool

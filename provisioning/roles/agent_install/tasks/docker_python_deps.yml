@@ -1,0 +1,14 @@
+---
+# community.docker.docker_image / docker_container / docker_container_info
+# исполняются модулями Ansible НА ЦЕЛЕВОМ хосте (как и любой другой Ansible-
+# модуль) и опираются на Python-библиотеку `docker` (docker-py) — не на
+# сам docker CLI. roles/docker_install ставит демон и CLI, но не эту
+# Python-библиотеку, поэтому она нужна здесь отдельно. Официальный apt-
+# пакет (не pip на хосте — тот же принцип "apt, не pip/curl", что и во
+# всех остальных ролях этого слайса).
+- name: Установить python3-docker (Python-биндинги, нужны community.docker.*)
+  ansible.builtin.apt:
+    name: python3-docker
+    state: present
+    update_cache: true
+    cache_valid_time: 3600

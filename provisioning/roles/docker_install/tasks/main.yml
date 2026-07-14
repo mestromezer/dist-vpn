@@ -1,0 +1,75 @@
+---
+- name: Убедиться, что ОС — Debian/Ubuntu (используется apt-репозиторий Docker)
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'Debian'
+    fail_msg: >-
+      roles/docker_install поддерживает только Debian/Ubuntu (apt). Обнаружено:
+      {{ ansible_facts['os_family'] }}.
+
+- name: Установить зависимости для добавления apt-репозитория по HTTPS
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Создать /etc/apt/keyrings
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Скачать официальный GPG-ключ репозитория Docker
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Подключить официальный apt-репозиторий Docker (не дистрибутивный пакет, ТЗ-7 §3.4)
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ docker_deb_arch }} signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}
+      {{ ansible_facts['distribution_release'] }} {{ docker_apt_repo_channel }}
+    filename: docker
+    state: present
+    update_cache: true
+  vars:
+    docker_deb_arch: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else ansible_facts['architecture'] }}"
+
+- name: Установить Docker CE из официального репозитория
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+
+- name: Включить и запустить Docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+# Docker-демон слушает только unix-сокет /var/run/docker.sock по умолчанию
+# (ничего дополнительно не открываем/не конфигурируем для tcp:// — ТЗ-7 §3.4:
+# "демон сокет не публикуется наружу без крайней необходимости").
+
+- name: "Добавить {{ provision_user }} в группу docker (без sudo для docker-команд)"
+  ansible.builtin.user:
+    name: "{{ provision_user }}"
+    groups: docker
+    append: true
+  when: docker_add_provision_user_to_group | bool
+
+- name: "Диагностика: Docker установлен"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] Docker установлен из официального репозитория
+      ({{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_release'] }},
+      канал {{ docker_apt_repo_channel }}), демон включён и запущен.
