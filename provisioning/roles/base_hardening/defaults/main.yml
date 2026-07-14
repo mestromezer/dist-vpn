@@ -1,0 +1,76 @@
+---
+# provision_user / provision_user_ssh_public_key НЕ определены здесь — общий
+# источник истины для них: group_vars/all/main.yml (используются и этой
+# ролью, и roles/docker_install — см. комментарий там же).
+
+# --- Пользователь и sudo ---
+provision_user_groups:
+  - sudo
+provision_user_shell: /bin/bash
+
+# Хэш пароля для sudo (roles/base_hardening/tasks/user.yml). Пусто по
+# умолчанию = учётной записи вообще не задаётся пароль (вход только по
+# SSH-ключу) — сознательное упрощение для одноразового provisioning-потока.
+# Реальное значение — только из зашифрованной vault-переменной
+# vault_provision_user_password_hash (см. group_vars/all/vault.yml.example).
+provision_user_password_hash: "{{ vault_provision_user_password_hash | default('') }}"
+
+# true (по умолчанию) = sudo без пароля для provision_user — приемлемо для
+# одноразового provisioning-потока, где единственный способ входа и так уже
+# только по операторскому SSH-ключу. Поставьте false и задайте
+# vault_provision_user_password_hash + ansible_become_password (Vault), если
+# нужен sudo с паролем.
+provision_user_nopasswd_sudo: true
+
+# --- SSH-хардненинг (ТЗ-7 §3.1, Mozilla OpenSSH Guidelines, CIS Benchmark) ---
+ssh_port: 22
+ssh_permit_root_login: "no"
+ssh_password_authentication: "no"
+ssh_max_auth_tries: 3
+ssh_allow_groups: [] # напр. ["sudo"] — пусто = не ограничивать явным списком
+ssh_allow_users: [] # опционально, см. ТЗ-7 §3.1
+
+# Актуальный (не устаревший) список Mozilla — приоритет AEAD-алгоритмам,
+# CTR-шифры сознательно не включены (только для обратной совместимости,
+# которая этому проекту не нужна — все ноды под нашим управлением).
+ssh_ciphers:
+  - chacha20-poly1305@openssh.com
+  - aes256-gcm@openssh.com
+  - aes128-gcm@openssh.com
+ssh_macs:
+  - hmac-sha2-512-etm@openssh.com
+  - hmac-sha2-256-etm@openssh.com
+  - umac-128-etm@openssh.com
+ssh_kex_algorithms:
+  - curve25519-sha256
+  - curve25519-sha256@libssh.org
+  - diffie-hellman-group16-sha512
+
+# --- ufw (ТЗ-7 §3.2) ---
+ufw_allow_ssh: true
+
+# Роль-специфичные allow-правила ufw ПОВЕРХ SSH — форма единая (список
+# словарей port/proto/comment), читается по ключу текущей роли ноды
+# (roles/base_hardening/tasks/firewall.yml: role_firewall_rules[role]).
+#
+# Значения здесь — {} по каждой роли: безопасный fallback, который сам по
+# себе ничего не открывает. РЕАЛЬНЫЕ роль-специфичные значения задаются в
+# group_vars/entry_nodes.yml / group_vars/exit_nodes.yml — group_vars имеет
+# более высокий приоритет, чем defaults роли, и полностью замещает этот
+# словарь для хоста, входящего в соответствующую группу инвентаря. См.
+# комментарии в group_vars/entry_nodes.yml и group_vars/exit_nodes.yml за
+# полным обоснованием конкретных портов (в т.ч. почему backhaul Hop B и
+# control-plane mTLS-порт по-прежнему НЕ фигурируют как allow-правила в
+# этом слайсе — это не забывчивость, см. те же комментарии).
+role_firewall_rules:
+  entry: []
+  exit: []
+
+# --- fail2ban (ТЗ-7 §3.3) ---
+fail2ban_bantime: 1h
+fail2ban_findtime: 10m
+fail2ban_maxretry: 3
+
+# --- unattended-upgrades / chrony (ТЗ-7 §3.4) ---
+unattended_upgrades_enabled: true
+chrony_enabled: true

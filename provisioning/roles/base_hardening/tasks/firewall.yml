@@ -1,0 +1,45 @@
+---
+- name: Установить ufw
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Порядок ниже намеренно такой: сначала политика по умолчанию и allow-правила
+# (в т.ч. SSH), и только В САМОМ КОНЦЕ — включение ufw. Так на первом прогоне
+# (ufw ещё выключен) нет ни секунды, когда правила уже "deny all", а SSH ещё
+# не разрешён — самоблокировка невозможна по конструкции порядка задач.
+
+- name: "Политика по умолчанию: deny incoming"
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: "Политика по умолчанию: allow outgoing"
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Разрешить SSH-порт (единственное allow-правило на этом этапе, ТЗ-7 §3.2)
+  community.general.ufw:
+    rule: allow
+    port: "{{ ssh_port | string }}"
+    proto: tcp
+    comment: "SSH — base_hardening"
+  when: ufw_allow_ssh | bool
+
+- name: "Роль-специфичные порты поверх SSH (role={{ role | default('unknown') }})"
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port | string }}"
+    proto: "{{ item.proto | default('tcp') }}"
+    comment: "{{ item.comment | default('role-specific: ' ~ role) }}"
+  loop: "{{ role_firewall_rules[role] | default([]) }}"
+  when: role is defined and role in role_firewall_rules
+  loop_control:
+    label: "{{ item.port }}/{{ item.proto | default('tcp') }}"
+
+- name: Включить ufw
+  community.general.ufw:
+    state: enabled
