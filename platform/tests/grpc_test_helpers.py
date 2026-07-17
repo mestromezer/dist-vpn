@@ -26,7 +26,6 @@ from dist_vpn_platform.generated import agent_control_pb2 as pb
 from dist_vpn_platform.grpc_server.servicer import AgentControlServicer
 from dist_vpn_platform.models.enrollment_token import EnrollmentToken
 from dist_vpn_platform.models.node import NodeRole
-from dist_vpn_platform.security import mtls_ca
 from dist_vpn_platform.security.enrollment_tokens import generate_token, hash_token
 
 
@@ -46,34 +45,21 @@ def generate_test_csr_pem(common_name: str = "fake-agent") -> bytes:
 
 
 class FakeContext:
-    """Stands in for a connection that already presented a client cert - every test
-    using this fake drives enrollment-then-heartbeat/telemetry/etc. through the *logic*
-    layer, not the real TLS handshake (that's what tests/test_mtls_integration.py is
-    for), so it should behave like an already-certified Agent rather than the
-    uncertified-peer case Session() now also has to handle (see
-    grpc_server/server.py's require_client_auth=False module docstring).
+    """Stands in for a real grpc.aio.ServicerContext - every test using this fake
+    drives enrollment-then-heartbeat/telemetry/etc. through the *logic* layer, not a
+    real TLS handshake (that's what tests/test_mtls_integration.py is for).
 
-    Session() now verifies the peer cert itself (mtls_ca.verify_client_cert_pem) rather
-    than trusting grpc's peer_identities()/auth_context() at face value - found, while
-    wiring up require_client_auth=False, that grpc's C-core doesn't chain-verify an
-    *offered* client cert in that mode at all. So this fake has to hand back a cert
-    that *actually verifies* against whatever CA is active for the current test
-    (tests/conftest.py::_mtls_ca_dir gives every test its own, autouse), not a fixed
-    placeholder string - signs a real throwaway CSR against it lazily on first use."""
+    grpc_server/server.py now runs the servicer behind two separate listeners
+    (strict-mTLS vs enrollment-only, see that module's docstring) rather than
+    inspecting per-connection cert state, so AgentControlServicer itself takes an
+    `enrollment_only` constructor flag - this fake context needs no cert-related
+    surface at all any more (an earlier version of this comment described one; see
+    git history if curious why it didn't work out - grpc doesn't expose an *offered*
+    client cert to the application when client auth isn't required for a listener,
+    which was the whole problem)."""
 
     def peer(self) -> str:
         return "fake-peer"
-
-    def auth_context(self) -> dict[str, list[bytes]]:
-        key = ec.generate_private_key(ec.SECP256R1())
-        csr = (
-            x509.CertificateSigningRequestBuilder()
-            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "fake-agent")]))
-            .sign(key, hashes.SHA256())
-        )
-        ca = mtls_ca.get_mtls_material().ca
-        cert_pem = mtls_ca.sign_client_csr(ca, csr.public_bytes(serialization.Encoding.PEM))
-        return {"x509_pem_cert": [cert_pem]}
 
 
 class FakeRequestIterator:
