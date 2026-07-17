@@ -15,12 +15,16 @@ the CSR-signing math in test_mtls_ca.py) actually works end-to-end:
      grpc_server/server.py's module docstring for why `require_client_auth=True` made
      enrollment structurally impossible, found while validating a real two-VDS
      deployment) and can complete Enrollment, but cannot do anything else - a second,
-     equally uncertified connection attempting a Heartbeat is refused by
-     grpc_server/servicer.py::Session before it's processed.
-  3. A client presenting a certificate signed by a *different*, untrusted CA (even
-     while correctly trusting the real server's CA to verify the server side) cannot
-     establish the channel either - a cert that IS offered still has to chain to the
-     server's `root_certificates`; only the "offered no cert" case is optional now.
+     equally uncertified connection attempting a Heartbeat gets no reply, because
+     grpc_server/servicer.py::Session refuses to process it.
+  3. A client presenting a certificate signed by a *different*, untrusted CA also gets
+     to open the channel (found while wiring up require_client_auth=False: grpc's
+     C-core does NOT chain-verify an *offered* client cert in that mode at all - that's
+     "request but don't verify", not "verify if offered"; only require_client_auth=True
+     gets chain verification from grpc/BoringSSL itself) - but is refused the same way
+     as the no-cert case the moment it tries anything, because Session() verifies the
+     offered cert itself (security/mtls_ca.py::verify_client_cert_pem) rather than
+     trusting grpc's word for it.
 """
 from __future__ import annotations
 
@@ -120,17 +124,19 @@ async def test_real_mtls_channel_completes_enrollment(tmp_path, db_engine: None)
 
 @pytest.mark.asyncio
 async def test_client_with_no_certificate_can_enroll_but_nothing_else(tmp_path, db_engine: None) -> None:
-    server, port, _material = await _start_real_server(tmp_path / "ca")
+    server, port, material = await _start_real_server(tmp_path / "ca")
     try:
-        # An uncertified client CAN open the channel now (transport-level
-        # require_client_auth=False - see server.py module docstring) and CAN
-        # complete a real Enrollment round trip with it, same as the certified case
-        # above, just without presenting a cert first.
-        insecure_channel = grpc.aio.insecure_channel(f"localhost:{port}")
+        # A *TLS* channel (still verifies the server's own cert against the real CA -
+        # this is not plaintext) that simply never offers a client certificate at all.
+        # grpc.aio.insecure_channel would be the wrong tool here - that's plaintext, no
+        # TLS handshake whatsoever, which could never reach a TLS-only server regardless
+        # of require_client_auth and would prove nothing about this specific behavior.
+        no_cert_credentials = grpc.ssl_channel_credentials(root_certificates=material.ca.cert_pem)
+        channel = grpc.aio.secure_channel(f"localhost:{port}", no_cert_credentials)
         try:
-            await asyncio.wait_for(insecure_channel.channel_ready(), timeout=_CHANNEL_READY_TIMEOUT)
+            await asyncio.wait_for(channel.channel_ready(), timeout=_CHANNEL_READY_TIMEOUT)
 
-            stub = pb_grpc.AgentControlStub(insecure_channel)
+            stub = pb_grpc.AgentControlStub(channel)
             plaintext = await seed_enrollment_token()
 
             async def _enroll_request():
@@ -149,12 +155,12 @@ async def test_client_with_no_certificate_can_enroll_but_nothing_else(tmp_path, 
             assert reply.enrollment_ack.accepted is True
             call.cancel()
         finally:
-            await insecure_channel.close()
+            await channel.close()
 
         # A *second*, equally uncertified connection sending anything other than
         # Enrollment must be refused by servicer.py::Session, not processed - it
         # closes the stream immediately instead of yielding a reply.
-        second_channel = grpc.aio.insecure_channel(f"localhost:{port}")
+        second_channel = grpc.aio.secure_channel(f"localhost:{port}", no_cert_credentials)
         try:
             await asyncio.wait_for(second_channel.channel_ready(), timeout=_CHANNEL_READY_TIMEOUT)
             stub = pb_grpc.AgentControlStub(second_channel)
@@ -172,7 +178,7 @@ async def test_client_with_no_certificate_can_enroll_but_nothing_else(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_client_certificate_from_untrusted_ca_is_rejected(tmp_path) -> None:
+async def test_client_certificate_from_untrusted_ca_is_rejected(tmp_path, db_engine: None) -> None:
     server, port, material = await _start_real_server(tmp_path / "ca")
     try:
         # A second, wholly unrelated CA - simulates a rogue/never-enrolled client
@@ -183,8 +189,13 @@ async def test_client_certificate_from_untrusted_ca_is_rejected(tmp_path) -> Non
 
         # Trusts the REAL server's CA to verify the server side (so a failure here
         # can't be mistaken for "server cert not trusted") but presents a client cert
-        # signed by the rogue CA - require_client_auth + the server's real CA root
-        # must reject it.
+        # signed by the rogue CA. The channel itself opens fine - grpc's C-core doesn't
+        # chain-verify an offered cert under require_client_auth=False (see module
+        # docstring) - so the rejection has to be proven one level up, the same way as
+        # the no-cert case: the rogue cert can't even complete Enrollment with it,
+        # because Session()/verify_client_cert_pem() doesn't recognize it as ours
+        # either way, and a rogue cert doesn't make Enrollment's own token check any
+        # more likely to pass.
         channel_credentials = grpc.ssl_channel_credentials(
             root_certificates=material.ca.cert_pem,
             private_key=client_key_pem,
@@ -192,8 +203,15 @@ async def test_client_certificate_from_untrusted_ca_is_rejected(tmp_path) -> Non
         )
         channel = grpc.aio.secure_channel(f"localhost:{port}", channel_credentials)
         try:
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(channel.channel_ready(), timeout=_CHANNEL_READY_TIMEOUT)
+            await asyncio.wait_for(channel.channel_ready(), timeout=_CHANNEL_READY_TIMEOUT)
+            stub = pb_grpc.AgentControlStub(channel)
+
+            async def _heartbeat_request():
+                yield pb.AgentMessage(heartbeat=pb.Heartbeat(node_id="some-node-id"))
+
+            call = stub.Session(_heartbeat_request())
+            reply = await call.read()
+            assert reply == grpc.aio.EOF, "a cert from an untrusted CA must not be treated as authenticated"
         finally:
             await channel.close()
     finally:

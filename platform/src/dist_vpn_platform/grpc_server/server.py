@@ -16,14 +16,18 @@ transport layer that unconditionally demands a client cert kills the connection 
 the Agent can even send that first message. This is the same shape of problem RFC 7030
 (EST) and Kubernetes bootstrap tokens solve the same way: TLS with an OPTIONAL client
 cert at the transport layer, plus an application-layer one-time-token check for the one
-RPC that's allowed to proceed without one. `require_client_auth=False` below does NOT
-weaken verification of a cert that IS presented - BoringSSL still rejects any offered
-cert that doesn't chain to `root_certificates` (see
-tests/test_mtls_integration.py::test_client_certificate_from_untrusted_ca_is_rejected,
-still enforced under optional mode). What changes is only that "no cert offered" no
-longer aborts the handshake - grpc_server/servicer.py::Session then gates every message
-kind OTHER than Enrollment behind `context.peer_identities()` being non-empty, so a
-connection with no cert can do nothing but attempt enrollment.
+RPC that's allowed to proceed without one.
+
+Also found while wiring this up (confirmed empirically, not just from docs - see CI
+results that shaped this comment): grpc's C-core does NOT chain-verify an *offered*
+client cert against `root_certificates` when `require_client_auth=False` - that mode is
+"request the cert but don't verify it", not "verify it if offered". Only
+`require_client_auth=True` gets chain verification from grpc/BoringSSL itself. So this
+change moves ALL client-cert trust decisions to the application layer:
+grpc_server/servicer.py::Session pulls whatever PEM cert `context.auth_context()`
+reports for the peer (if any) and verifies it itself against our own CA
+(security/mtls_ca.py::verify_client_cert_pem) before treating the connection as
+certified - and only a certified connection may send anything other than Enrollment.
 """
 from __future__ import annotations
 

@@ -220,12 +220,21 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
         peer = context.peer()
         # server.py binds with require_client_auth=False (see its module docstring for
         # why) - a peer with no client cert can still open this stream at all, so this
-        # is the one place that must draw the line the transport layer no longer draws:
-        # `peer_identities()` is non-empty only for a connection that presented a
-        # client cert BoringSSL verified against our own CA (an unverifiable cert never
-        # gets this far - the handshake itself would already have failed). A connection
-        # with no cert is allowed to attempt exactly one thing below: Enrollment.
-        has_client_cert = bool(context.peer_identities())
+        # is the one place that must draw the line the transport layer no longer draws.
+        #
+        # Found while wiring this up: grpc's C-core does NOT verify an *offered*
+        # client cert's chain of trust when require_client_auth=False - that mode is
+        # "request but don't verify", not "verify if offered" (require_client_auth=True
+        # is the only mode BoringSSL itself chain-checks a client cert in). So
+        # `peer_identities()`/`auth_context()` being non-empty only means *a* cert was
+        # offered, not that it was ours - trusting that alone would let literally any
+        # self-signed cert from anywhere impersonate an enrolled node. Pull the actual
+        # PEM bytes grpc exposes for the peer (`x509_pem_cert`, populated whenever any
+        # cert was offered, verified or not) and check it ourselves against our own CA.
+        cert_pem_values = context.auth_context().get("x509_pem_cert")
+        has_client_cert = bool(cert_pem_values) and mtls_ca.verify_client_cert_pem(
+            mtls_ca.get_mtls_material().ca, cert_pem_values[0]
+        )
         logger.info("grpc_session_opened", extra={"peer": peer, "has_client_cert": has_client_cert})
 
         # Every PlatformMessage bound for this Agent (enrollment ack *and* dispatched
