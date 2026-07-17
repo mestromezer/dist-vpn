@@ -115,3 +115,30 @@ agent_mtls_client_key_dest: /etc/dist-vpn-agent/tls/client-key.pem
 # явным осознанным решением оператора (group_vars/host_vars для конкретной
 # dev/тестовой ноды), а не default этой роли.
 agent_insecure_dev_mode: false
+
+# --- Host-путь конфига Xray (найдено при реальном two-VDS деплое: этот путь
+# отсутствовал в run.yml полностью) --- agent/src/dist_vpn_agent/config.py
+# (xray_config_host_path, default /etc/dist-vpn/xray-config.json) -- это ХОСТ-путь,
+# который Agent сам пишет и затем передаёт docker_manager.py как bind-mount source
+# при создании соседнего Xray-контейнера через docker-socket-proxy. Раньше эта роль
+# никогда не монтировала этот путь В КОНТЕЙНЕР САМОГО Agent'а -- Agent пытался
+# писать файл только внутри своей эфемерной контейнерной ФС, в каталог /etc,
+# владелец root, процесс -- непривилегированный agent: PermissionError при каждом
+# старте. Фикс -- bind-mount ОДНОГО И ТОГО ЖЕ пути по обе стороны (хост и
+# контейнер), чтобы запись Agent'а физически оказалась на хосте по пути, который
+# затем реально существует для docker-демона хоста, когда Agent просит его
+# смонтировать этот путь в НОВЫЙ (Xray) контейнер.
+agent_xray_config_host_dir: /etc/dist-vpn
+agent_xray_config_host_path: "{{ agent_xray_config_host_dir }}/xray-config.json"
+
+# UID/GID пользователя `agent`, зашитого в agent/Dockerfile (useradd --system --
+# первый системный пользователь в свежем Debian-based образе стабильно получает
+# 999, но это следствие конкретного Dockerfile/базового образа, не гарантия
+# платформы) -- bind-mount не транслирует UID/GID между хостом и контейнером
+# (тот же класс компромисса, что уже задокументирован для клиентского mTLS-ключа
+# ниже), так что хостовый каталог должен быть заранее chown'нут на этот UID,
+# иначе непривилегированный процесс agent внутри контейнера не сможет в него
+# писать. Проверено фактическим `docker run --rm --entrypoint id
+# dist-vpn-agent:local` на реальной сборке этой роли.
+agent_container_uid: 999
+agent_container_gid: 999

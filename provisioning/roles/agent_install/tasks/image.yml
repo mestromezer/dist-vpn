@@ -59,6 +59,16 @@
 # contracts/proto/agent_control.proto, который лежит вне agent/, а Docker
 # не умеет COPY за пределы своего контекста. Именно поэтому эта роль
 # клонирует ВЕСЬ репозиторий на хост, а не копирует только каталог agent/.
+#
+# force_source: true — найдено при реальном деплое: без него
+# community.docker.docker_image с state: present считает задачу выполненной,
+# если образ с именем agent_image_tag УЖЕ существует локально, и молча
+# пропускает пересборку — даже если source.yml только что заново
+# склонировал совсем другой agent_source_git_ref поверх старого checkout'а.
+# Один и тот же agent_image_tag (:local, без версии — см. defaults/main.yml
+# за честной оговоркой на этот счёт) переиспользовался между прогонами с
+# разными закреплёнными версиями, и нода продолжала запускать СТАРЫЙ образ,
+# полностью игнорируя новый исходный код.
 - name: "Собрать Docker-образ Agent'а из agent/Dockerfile (контекст — корень репозитория)"
   community.docker.docker_image:
     name: "{{ agent_image_tag }}"
@@ -67,6 +77,7 @@
       path: "{{ agent_source_checkout_dir }}"
       dockerfile: agent/Dockerfile
       pull: false
+    force_source: true
     state: present
   when: agent_image_source == 'build_from_source'
 
