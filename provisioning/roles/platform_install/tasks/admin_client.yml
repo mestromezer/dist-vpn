@@ -4,6 +4,13 @@
 # defaults/main.yml (platform_admin_client_src_dir) за полным обоснованием. Требует
 # Node.js/npm на машине оператора — та же зависимость, что уже была в ручном потоке
 # deploy.md, здесь просто автоматизирована.
+#
+# become: false на каждой delegate_to: localhost задаче ниже — найдено при реальном
+# деплое: site.yml включает become: true на уровне всего play (нужен для become на
+# ЦЕЛЕВОМ хосте), Ansible наследует это и для делегированных на localhost задач тоже,
+# так что без явного false команда пытается получить sudo на машине ОПЕРАТОРА и
+# зависает на "Timed out waiting for become success or become password prompt" —
+# ни npm, ни запись .env.production никакого root на localhost не требуют.
 - name: Определить итоговый VITE_API_URL для сборки Admin Client
   ansible.builtin.set_fact:
     platform_admin_client_resolved_api_url: >-
@@ -16,12 +23,14 @@
     dest: "{{ platform_admin_client_src_dir }}/.env.production"
     mode: "0644"
   delegate_to: localhost
+  become: false
 
 - name: Установить зависимости Admin Client (npm ci, на машине оператора)
   ansible.builtin.command:
     cmd: npm ci
     chdir: "{{ platform_admin_client_src_dir }}"
   delegate_to: localhost
+  become: false
   changed_when: true
 
 - name: Собрать Admin Client (npm run build, на машине оператора)
@@ -29,15 +38,27 @@
     cmd: npm run build
     chdir: "{{ platform_admin_client_src_dir }}"
   delegate_to: localhost
+  become: false
   changed_when: true
 
+# owner: provision_user (не root), recurse: true — найдено при реальном деплое:
+# ansible.posix.synchronize делегирован на localhost и оттуда сам открывает ssh к
+# целевому хосту как ansible_user (после хардненинга — provision_user, не root, и
+# ЭТА конкретная ssh-сессия не проходит через Ansible become вообще, в отличие от
+# обычных задач роли) — если каталог (или что-то внутри него, оставшееся от
+# предыдущего прогона до этого фикса) принадлежит root, запись/выставление mtime от
+# provision_user'а падает с Permission denied. recurse: true — не только сам
+# каталог, но и всё, что уже могло в нём накопиться root-владельцем за прошлые
+# прогоны. Контейнеру nginx (task ниже) владелец на хосте не важен — он всё равно
+# читает файлы только на чтение (:ro).
 - name: Убедиться, что каталог для статики Admin Client существует на целевом хосте
   ansible.builtin.file:
     path: /opt/admin-client-dist
     state: directory
-    owner: root
-    group: root
+    owner: "{{ provision_user }}"
+    group: "{{ provision_user }}"
     mode: "0755"
+    recurse: true
 
 - name: Убедиться, что rsync установлен на целевом хосте (нужен ansible.posix.synchronize ниже)
   ansible.builtin.apt:
@@ -52,14 +73,26 @@
 # каждую сборку целиком, delete=true подчищает предыдущую сборку, а не копит их).
 # Требует rsync также и НА МАШИНЕ ОПЕРАТОРА (control-машина) — на WSL/Linux обычно
 # уже есть; поставить вручную (apt install rsync), если ansible упадёт на этом шаге.
+#
+# archive: false / recursive+times вместо дефолтного archive-режима — найдено при
+# реальном деплое: дефолтный `-a` пытается сохранить владельца/группу файлов
+# (`--group`), а provision_user (deploy) на целевом хосте не входит в группу,
+# которой владеют файлы на машине оператора, и не может её выставить чужому файлу
+# без root — `rsync: chgrp ... failed: Operation not permitted`. Владелец/группа
+# статических файлов для nginx (:ro bind-mount) не имеют значения вообще, поэтому
+# просто не пытаемся их сохранять.
 - name: Залить собранную статику Admin Client на целевой хост
   ansible.posix.synchronize:
     src: "{{ platform_admin_client_src_dir }}/dist/"
     dest: /opt/admin-client-dist/
+    archive: false
+    recursive: true
+    times: true
     delete: true
     rsync_opts:
       - "--exclude=.git"
   delegate_to: localhost
+  become: false
 
 - name: Запустить контейнер Admin Client, если ещё не запущен (nginx, только 127.0.0.1 — наружу через Caddy)
   community.docker.docker_container:
