@@ -218,7 +218,15 @@ async def dispatch_test(node_id: str, command: pb.Command, *, timeout: float = 3
 class AgentControlServicer(pb_grpc.AgentControlServicer):
     async def Session(self, request_iterator, context: grpc.aio.ServicerContext):
         peer = context.peer()
-        logger.info("grpc_session_opened", extra={"peer": peer})
+        # server.py binds with require_client_auth=False (see its module docstring for
+        # why) - a peer with no client cert can still open this stream at all, so this
+        # is the one place that must draw the line the transport layer no longer draws:
+        # `peer_identities()` is non-empty only for a connection that presented a
+        # client cert BoringSSL verified against our own CA (an unverifiable cert never
+        # gets this far - the handshake itself would already have failed). A connection
+        # with no cert is allowed to attempt exactly one thing below: Enrollment.
+        has_client_cert = bool(context.peer_identities())
+        logger.info("grpc_session_opened", extra={"peer": peer, "has_client_cert": has_client_cert})
 
         # Every PlatformMessage bound for this Agent (enrollment ack *and* dispatched
         # Commands) flows through this single queue, so there is exactly one place
@@ -230,6 +238,15 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             try:
                 async for message in request_iterator:
                     kind = message.WhichOneof("payload")
+                    if not has_client_cert and kind != "enrollment":
+                        # Uncertified peer trying to do anything other than enroll -
+                        # this is either a bug in a legitimate Agent or someone probing
+                        # the port with no credentials at all. Refuse and close rather
+                        # than silently ignoring, so it fails loudly instead of hanging.
+                        logger.warning(
+                            "grpc_uncertified_peer_rejected", extra={"peer": peer, "kind": kind}
+                        )
+                        break
                     if kind == "enrollment":
                         ack = await self._handle_enrollment(message.enrollment, peer=peer)
                         if ack.accepted:

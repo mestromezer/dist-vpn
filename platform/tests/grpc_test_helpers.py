@@ -45,8 +45,19 @@ def generate_test_csr_pem(common_name: str = "fake-agent") -> bytes:
 
 
 class FakeContext:
+    """Stands in for a connection that already presented a client cert BoringSSL
+    verified against our own CA (see grpc_server/server.py's require_client_auth=False
+    module docstring) - every test using this fake drives enrollment-then-heartbeat/
+    telemetry/etc. through the *logic* layer, not the real TLS handshake (that's what
+    tests/test_mtls_integration.py is for), so it should behave like an already-
+    certified Agent rather than the uncertified-peer case Session() now also has to
+    handle."""
+
     def peer(self) -> str:
         return "fake-peer"
+
+    def peer_identities(self) -> list[bytes]:
+        return [b"fake-agent-cert"]
 
 
 class FakeRequestIterator:

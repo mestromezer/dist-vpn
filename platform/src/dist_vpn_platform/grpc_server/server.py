@@ -2,11 +2,28 @@
 
 TZ-5 §5: bounded message size so one overloaded node can't degrade the others.
 TZ-5 §6.2: real mutual TLS - the server presents a leaf cert signed by the Platform's
-own CA (security/mtls_ca.py) and requires + verifies a client cert against that same
-CA root for every connecting Agent. No plaintext/insecure credentials in this slice
-(the old `insecure_server_credentials()` local-dev-only stub is gone - see git history
-on this file for the previous version and platform/README.md "Отклонения от ТЗ" #9,
-now resolved).
+own CA (security/mtls_ca.py) and verifies any client cert against that same CA root.
+No plaintext/insecure credentials in this slice (the old `insecure_server_credentials()`
+local-dev-only stub is gone - see git history on this file for the previous version and
+platform/README.md "Отклонения от ТЗ" #9, now resolved).
+
+Found while validating a real two-VDS deployment (not caught by mocked tests - see
+TESTING.md): `require_client_auth=True` made bootstrap enrollment structurally
+impossible. A brand-new Agent has no client cert yet - that's the entire point of the
+one-time-token Enrollment RPC (grpc_server/servicer.py::_handle_enrollment, which
+authenticates the token from the message body, not from TLS peer identity) - so a
+transport layer that unconditionally demands a client cert kills the connection before
+the Agent can even send that first message. This is the same shape of problem RFC 7030
+(EST) and Kubernetes bootstrap tokens solve the same way: TLS with an OPTIONAL client
+cert at the transport layer, plus an application-layer one-time-token check for the one
+RPC that's allowed to proceed without one. `require_client_auth=False` below does NOT
+weaken verification of a cert that IS presented - BoringSSL still rejects any offered
+cert that doesn't chain to `root_certificates` (see
+tests/test_mtls_integration.py::test_client_certificate_from_untrusted_ca_is_rejected,
+still enforced under optional mode). What changes is only that "no cert offered" no
+longer aborts the handshake - grpc_server/servicer.py::Session then gates every message
+kind OTHER than Enrollment behind `context.peer_identities()` being non-empty, so a
+connection with no cert can do nothing but attempt enrollment.
 """
 from __future__ import annotations
 
@@ -39,12 +56,16 @@ def build_server() -> grpc.aio.Server:
     credentials = grpc.ssl_server_credentials(
         [(material.server.key_pem, material.server.cert_pem)],
         root_certificates=material.ca.cert_pem,
-        require_client_auth=True,  # real mTLS: reject any peer without a cert signed by our CA
+        # Optional, not required, at the transport layer - see module docstring above
+        # for why. A presented cert is still verified against root_certificates; only
+        # an ABSENT cert is now allowed through to the application layer, where
+        # servicer.py::Session restricts what an uncertified peer may do to Enrollment.
+        require_client_auth=False,
     )
 
     bind_address = f"{settings.grpc_host}:{settings.grpc_port}"
     server.add_secure_port(bind_address, credentials)
-    logger.info("grpc_server_configured", extra={"bind_address": bind_address, "tls": "mutual"})
+    logger.info("grpc_server_configured", extra={"bind_address": bind_address, "tls": "mutual-optional"})
     return server
 
 
