@@ -1,0 +1,26 @@
+---
+# Тот же принцип честной диагностики, что и roles/agent_install/tasks/verify.yml:
+# подтверждает, что процессы поднялись, НЕ подтверждает полную сквозную готовность
+# (например, что DNS для platform_domain уже резолвится, если он задан — Caddy
+# сам будет ретраить получение сертификата, пока это не так).
+- name: Проверить HTTP через Caddy (self-signed допустим — только код ответа)
+  ansible.builtin.uri:
+    url: "https://{{ platform_domain if platform_domain else ansible_host }}/docs"
+    validate_certs: false
+    status_code: 200
+  register: platform_caddy_check
+  retries: 6
+  delay: 5
+  until: platform_caddy_check.status == 200
+
+- name: "Диагностика: Platform поднят и отвечает через Caddy"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] Platform отвечает на
+      https://{{ platform_domain if platform_domain else ansible_host }}/docs
+      (HTTP {{ platform_caddy_check.status }}). Это подтверждает, что REST API
+      поднят и проксируется — НЕ то же самое, что "gRPC-порты 50051/50052
+      реально принимают Agent'ов" (для этого нужен реальный enrollment, см.
+      TESTING.md) или "Let's Encrypt-сертификат выпущен" (если задан
+      platform_domain — Caddy логирует это отдельно, проверьте `docker logs
+      caddy` при первом запуске).

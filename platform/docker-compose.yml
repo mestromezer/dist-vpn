@@ -41,9 +41,13 @@ services:
       PLATFORM_MTLS_SERVER_SANS: ${PLATFORM_MTLS_SERVER_SANS:-localhost,127.0.0.1}
     ports:
       # Host ports are overridable (`PLATFORM_HOST_HTTP_PORT=8001 docker compose ...`)
-      # in case 8000/50051 are already taken on the host by something else.
+      # in case 8000/50051/50052 are already taken on the host by something else.
       - "${PLATFORM_HOST_HTTP_PORT:-8000}:8000"   # REST/WebSocket API for Admin Client
-      - "${PLATFORM_HOST_GRPC_PORT:-50051}:50051" # gRPC AgentControl for Agents
+      - "${PLATFORM_HOST_GRPC_PORT:-50051}:50051" # gRPC AgentControl, strict mTLS - Agents once enrolled
+      # No client cert required - Enrollment only (grpc_server/server.py's module
+      # docstring has the full "why two ports" reasoning). Must stay reachable
+      # alongside 50051 for a brand-new Agent to ever be able to enroll at all.
+      - "${PLATFORM_HOST_GRPC_ENROLLMENT_PORT:-50052}:50052"
     volumes:
       # Persistent CA/server-cert storage (TZ-5 §6.2) - survives `docker compose down`
       # (without -v) and container recreation; the CA private key is generated once,

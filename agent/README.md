@@ -135,7 +135,8 @@ bash scripts/gen_proto.sh
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `AGENT_PLATFORM_ADDRESS` | `localhost:50051` | `host:port` Platform gRPC-эндпоинта. Agent всегда сам инициирует соединение (dial-out, TZ-4 §5.1), никогда не принимает входящие control-plane соединения |
+| `AGENT_PLATFORM_ADDRESS` | `localhost:50051` | `host:port` Platform'а — строгий mTLS-эндпоинт (`require_client_auth=True`). Всё, кроме самого первого bootstrap-enrollment, идёт сюда. Agent всегда сам инициирует соединение (dial-out, TZ-4 §5.1), никогда не принимает входящие control-plane соединения |
+| `AGENT_PLATFORM_ENROLLMENT_ADDRESS` | *(не задано → `AGENT_PLATFORM_ADDRESS` с портом+1)* | `host:port` Platform'а без требования клиентского сертификата — только для Enrollment. Задавать явно только если два порта Platform развёрнуты не рядом друг с другом; см. `platform/src/dist_vpn_platform/grpc_server/server.py` за полным обоснованием, почему это отдельный порт, а не режим на основном |
 | `AGENT_ENROLLMENT_TOKEN` | *(пусто)* | Одноразовый TTL-токен для enrollment (TZ-4 §5.2) |
 | `AGENT_HOSTNAME` | `socket.gethostname()` | Имя ноды, отправляется в `Enrollment` |
 | `AGENT_AGENT_VERSION` | `0.1.0` | Версия агента, отправляется в `Enrollment` |

@@ -1,0 +1,48 @@
+---
+# Та же роль-механика, что и group_vars/entry_nodes.yml / exit_nodes.yml, но для
+# ноды Platform (одна на весь пул, roles/platform_install). До этого слайса Platform
+# разворачивался вручную по шагам из deploy.md (голый docker compose + ручной Caddy +
+# ручные правила ufw через SSH) — ничего не было воспроизводимым, каждая новая нода
+# требовала повторения всех шагов заново. Эта роль и группа сводят это к тому же
+# однокомандному потоку, что уже есть для entry/exit.
+role: platform
+
+# Роль-специфичные правила ufw для ноды Platform.
+#
+# 443/80 (allow) — Caddy (roles/platform_install), reverse-proxy перед REST API
+# (:8000, привязан только к 127.0.0.1 в docker-compose.yml — наружу не торчит вообще,
+# см. roles/platform_install/templates/docker-compose.override.yml.j2) и Admin
+# Client (:5173, туда же). Без домена Caddy поднимает `tls internal`
+# (самоподписанный, см. роль) — сознательный временный компромисс, задокументирован
+# как maintenance-пункт в SECRETS-ROTATION.md на переход на Let's Encrypt, когда
+# появится домен.
+#
+# 50051 (limit) — gRPC AgentControl, строгий mTLS (require_client_auth=True,
+# platform/src/dist_vpn_platform/grpc_server/server.py). Уже требует валидный
+# сертификат, подписанный CA Platform, так что этот rate-limit — вторая линия
+# защиты, не основная.
+#
+# 50052 (limit) — gRPC enrollment-only, БЕЗ клиентского сертификата вообще (тот же
+# файл, полное обоснование "почему два порта" — там же). Единственная защита этого
+# порта на транспортном уровне — сам факт, что соединение вообще не бесплатное
+# (нужно дождаться TLS-хендшейка), поэтому rate-limit здесь обязателен, а не
+# опционален — см. OWASP API4:2023 (Unrestricted Resource Consumption): порт,
+# принимающий соединения от кого угодно без предъявления учётных данных, обязан
+# быть defense-in-depth защищён на уровне сети, а не полагаться только на
+# высокоэнтропийный (256 бит, secrets.token_urlsafe(32)) одноразовый токен внутри.
+role_firewall_rules:
+  platform:
+    - port: 443
+      proto: tcp
+      comment: "Caddy HTTPS — REST API + Admin Client reverse proxy"
+    - port: 80
+      proto: tcp
+      comment: "Caddy HTTP — ACME/redirect only, см. роль"
+    - port: 50051
+      proto: tcp
+      rule: limit
+      comment: "gRPC AgentControl, строгий mTLS — rate-limit как вторая линия защиты"
+    - port: 50052
+      proto: tcp
+      rule: limit
+      comment: "gRPC enrollment-only, без клиентского сертификата — rate-limit обязателен (OWASP API4:2023)"

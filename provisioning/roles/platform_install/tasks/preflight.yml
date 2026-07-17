@@ -1,0 +1,29 @@
+---
+- name: "Preflight: репозиторий и закреплённая версия исходников Platform заданы"
+  ansible.builtin.assert:
+    that:
+      - platform_source_git_repo | length > 0
+      - platform_source_git_ref | length > 0
+      - platform_source_git_ref not in ['main', 'master', 'HEAD']
+    fail_msg: >-
+      platform_source_git_repo и platform_source_git_ref обязательны (тег или
+      полный commit SHA — НЕ имя ветки, ТЗ-7 §2.2 прямо запрещает паттерн
+      "последняя версия ветки", тот же принцип, что и roles/agent_install).
+      Передайте оба явно, например:
+      -e platform_source_git_repo=... -e platform_source_git_ref=<tag-или-sha>.
+
+- name: Убедиться, что секреты Platform заданы через vault
+  ansible.builtin.assert:
+    that:
+      - platform_jwt_secret_key | default('') | length > 0
+      - "'CHANGE_ME' not in (platform_jwt_secret_key | default(''))"
+      - platform_postgres_password | default('') | length > 0
+      - "'CHANGE_ME' not in (platform_postgres_password | default(''))"
+    fail_msg: >-
+      platform_jwt_secret_key / platform_postgres_password не заданы или
+      оставлены плейсхолдером из group_vars/all/vault.yml.example. Заполните
+      реальный group_vars/all/vault.yml (см. README «Секреты и Vault») —
+      сгенерировать: openssl rand -base64 32 для каждого. Эта роль намеренно
+      не задаёт для них значений по умолчанию — тот же принцип, что и
+      agent_platform_address/agent_enrollment_token в roles/agent_install.
+  no_log: true

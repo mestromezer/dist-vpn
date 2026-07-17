@@ -1,0 +1,76 @@
+---
+# Найдено при валидации реального деплоя на 3 VDS: Platform до этой роли
+# разворачивался только вручную по шагам из deploy.md (голый `docker compose up`,
+# ручной Caddy-контейнер по SSH, ручные правила ufw) — ни один из этих шагов не был
+# воспроизводимым или версионируемым, в отличие от agent_install. Эта роль
+# сворачивает их в тот же однокомандный поток `ansible-playbook site.yml -e
+# role=platform`, которым уже разворачиваются entry/exit-ноды.
+#
+# Форма и обоснование выбора build_from_source по умолчанию — то же самое, что и
+# roles/agent_install/defaults/main.yml (см. этот файл и provisioning/README.md
+# "Agent: сборка образа — откуда и почему" за развёрнутым обоснованием): на момент
+# написания этой роли у проекта нет ни CI/CD, публикующего готовые образы Platform в
+# реестр, ни самого реестра — единственное, что реально существует и закоммичено,
+# это platform/Dockerfile + platform/docker-compose.yml.
+platform_source_git_repo: ""
+platform_source_git_ref: ""
+platform_source_checkout_dir: /opt/dist-vpn/platform-src
+
+# --- Порты Platform (совпадают с дефолтами platform/.env.example /
+# platform/docker-compose.yml — единый источник истины для самих значений; эта роль
+# лишь передаёт их дальше в шаблон docker-compose.override.yml.j2 и в ufw-правила
+# group_vars/platform_nodes.yml, которые обязаны совпадать с этими же числами) ---
+platform_http_port: 8000
+platform_grpc_port: 50051
+# Без клиентского сертификата вообще — только Enrollment, см.
+# platform/src/dist_vpn_platform/grpc_server/server.py за полным обоснованием "почему
+# два порта, а не один опциональный".
+platform_grpc_enrollment_port: 50052
+platform_db_port: 5432
+platform_admin_client_port: 5173
+
+# --- Секреты (Ansible Vault, group_vars/all/vault.yml.example) --- Пусто по
+# умолчанию = явная ошибка в preflight (tasks/preflight.yml), а не молчаливый
+# докер-компоуз с дефолтным "platform:platform"/"dev-only-insecure-secret-change-me"
+# паролем в проде — тот же принцип, что и agent_platform_address/
+# agent_enrollment_token в roles/agent_install/defaults/main.yml.
+platform_jwt_secret_key: "{{ vault_platform_jwt_secret_key | default('') }}"
+platform_postgres_password: "{{ vault_platform_postgres_password | default('') }}"
+
+# --- Домен и TLS (roles/platform_install/templates/Caddyfile.j2) --- Пусто по
+# умолчанию = Caddy поднимается на `tls internal` (самоподписанный сертификат,
+# сгенерированный самим Caddy) — рабочий, но не доверенный внешними браузерами без
+# ручного импорта корневого сертификата Caddy. Production-ready финал — задать
+# platform_domain, указывающий DNS-записью на publiс IP этой ноды: тогда Caddy сам
+# получит настоящий Let's Encrypt-сертификат. См. SECRETS-ROTATION.md за maintenance-
+# пунктом "перейти на Let's Encrypt, когда появится домен".
+platform_domain: ""
+
+# --- Admin Client (собирается ЛОКАЛЬНО, на машине оператора — не на целевом хосте)
+# --- Vite вшивает VITE_API_URL В САМ БАНДЛ на этапе сборки (это build-time, не
+# runtime переменная — см. deploy.md/README.md за тем же обоснованием), поэтому
+# сборка не может happen на целевом хосте вместе с остальным (там нет исходников
+# admin-client в разработческом окружении с Node.js, да и незачем — итог сборки
+# всего лишь статические файлы). local_action-шаги (tasks/admin_client.yml)
+# запускают `npm ci && npm run build` НА МАШИНЕ ОПЕРАТОРА (delegate_to: localhost),
+# точно тот же процесс, что раньше выполнялся вручную по deploy.md шаг за шагом.
+# Требует Node.js/npm, установленных на машине оператора — та же зависимость, что
+# была и раньше, просто теперь автоматизирована.
+platform_admin_client_src_dir: "{{ playbook_dir }}/../admin-client"
+# Пусто = `https://{{ platform_domain }}/api/v1`, если задан platform_domain, иначе
+# `https://{{ ansible_host }}/api/v1` (самоподписанный Caddy) — см. tasks/admin_client.yml.
+platform_admin_client_api_url: ""
+
+# --- Образы вспомогательных контейнеров (Caddy, nginx для Admin Client) --- Без
+# закреплённой версии (:latest/:alpine) — тот же самый, не устранённый в этом
+# слайсе компромисс, что и agent_docker_proxy_image в roles/agent_install/defaults/
+# main.yml (нет собственного пайплайна, публикующего закреплённый тег) — оператор
+# должен закрепить версию сам перед production-раскаткой, см. README.
+platform_caddy_image: caddy:2-alpine
+platform_admin_client_nginx_image: nginx:alpine
+
+# --- CA-сертификат (roles/platform_install/tasks/ca_cert.yml) --- Куда на машине
+# ОПЕРАТОРА сохранить CA-сертификат, забранный из тома Platform после первого
+# старта. Передайте этот путь как agent_mtls_ca_cert_src при последующем
+# провижининге entry/exit-нод (roles/agent_install).
+platform_ca_cert_local_dest: "~/platform-ca.pem"

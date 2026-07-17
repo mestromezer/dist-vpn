@@ -28,8 +28,11 @@ ansible_become_password: "CHANGE_ME_generate_with_openssl_rand_-base64_24"
 # (roles/base_hardening/tasks/user.yml, ansible.builtin.user: password:).
 # Значение ansible_become_password (plaintext) и хэш ниже ДОЛЖНЫ
 # соответствовать одному и тому же паролю. Сгенерировать хэш:
-#   python3 -c "import crypt,getpass; print(crypt.crypt(getpass.getpass(), crypt.mksalt(crypt.METHOD_SHA512)))"
-# (или mkpasswd --method=sha-512 из пакета whois на Debian/Ubuntu)
+#   openssl passwd -6 -salt "$(openssl rand -hex 8)" "$ansible_become_password"
+# (mkpasswd --method=sha-512 из пакета whois на Debian/Ubuntu — тоже подходит.
+# ВНИМАНИЕ: python3 -c "import crypt..." — устаревший способ из более старой
+# версии этого файла — модуль crypt удалён из стандартной библиотеки в Python
+# 3.13+, найдено при реальном деплое; не полагайтесь на него.)
 vault_provision_user_password_hash: "$6$CHANGE_ME$replace_with_a_real_sha512_crypt_hash"
 
 # --- Используются roles/agent_install (ТЗ-4 §5.2, ТЗ-7 §4.3) — эти два
@@ -50,3 +53,19 @@ agent_platform_address: "CHANGE_ME_platform.example.internal:PORT"
 # только через это Vault-значение. Соответствует env-переменной
 # AGENT_ENROLLMENT_TOKEN (agent/README.md).
 agent_enrollment_token: "CHANGE_ME_one_time_token_from_platform"
+
+# --- Используются roles/platform_install (roles/platform_install/tasks/
+# preflight.yml проверяет, что оба заданы и не остались CHANGE_ME-плейсхолдером) ---
+# Добавлены позже agent_platform_address/agent_enrollment_token выше — найдено при
+# валидации реального деплоя, что Platform до этого разворачивался вручную с
+# дефолтными dev-секретами прямо из platform/docker-compose.yml
+# ("platform"/"dev-only-insecure-secret-change-me") — production-раскатка не
+# должна оставлять их как есть.
+
+# Секрет подписи JWT (ТЗ-5 §6.3) — соответствует PLATFORM_JWT_SECRET_KEY.
+# Сгенерировать: openssl rand -base64 32
+vault_platform_jwt_secret_key: "CHANGE_ME_generate_with_openssl_rand_-base64_32"
+
+# Пароль пользователя Postgres `platform` (роль db в platform/docker-compose.yml).
+# Сгенерировать: openssl rand -base64 24
+vault_platform_postgres_password: "CHANGE_ME_generate_with_openssl_rand_-base64_24"

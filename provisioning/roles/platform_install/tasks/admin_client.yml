@@ -1,0 +1,75 @@
+---
+# Собирается ЛОКАЛЬНО (delegate_to: localhost), не на целевом хосте — Vite вшивает
+# VITE_API_URL в сам бандл на этапе сборки (build-time, не runtime переменная), см.
+# defaults/main.yml (platform_admin_client_src_dir) за полным обоснованием. Требует
+# Node.js/npm на машине оператора — та же зависимость, что уже была в ручном потоке
+# deploy.md, здесь просто автоматизирована.
+- name: Определить итоговый VITE_API_URL для сборки Admin Client
+  ansible.builtin.set_fact:
+    platform_admin_client_resolved_api_url: >-
+      {{ platform_admin_client_api_url if platform_admin_client_api_url
+         else 'https://' ~ (platform_domain if platform_domain else ansible_host) ~ '/api/v1' }}
+
+- name: Записать .env.production для сборки Admin Client (на машине оператора)
+  ansible.builtin.copy:
+    content: "VITE_API_URL={{ platform_admin_client_resolved_api_url }}\n"
+    dest: "{{ platform_admin_client_src_dir }}/.env.production"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: Установить зависимости Admin Client (npm ci, на машине оператора)
+  ansible.builtin.command:
+    cmd: npm ci
+    chdir: "{{ platform_admin_client_src_dir }}"
+  delegate_to: localhost
+  changed_when: true
+
+- name: Собрать Admin Client (npm run build, на машине оператора)
+  ansible.builtin.command:
+    cmd: npm run build
+    chdir: "{{ platform_admin_client_src_dir }}"
+  delegate_to: localhost
+  changed_when: true
+
+- name: Убедиться, что каталог для статики Admin Client существует на целевом хосте
+  ansible.builtin.file:
+    path: /opt/admin-client-dist
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Убедиться, что rsync установлен на целевом хосте (нужен ansible.posix.synchronize ниже)
+  ansible.builtin.apt:
+    name: rsync
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# ansible.posix.synchronize оборачивает rsync (уже используется провижинингом через
+# collection requirements.yml) — быстрее и надёжнее пословной копии для директории
+# со сгенерированными статическими файлами (assets/ с хэшами в именах меняются
+# каждую сборку целиком, delete=true подчищает предыдущую сборку, а не копит их).
+# Требует rsync также и НА МАШИНЕ ОПЕРАТОРА (control-машина) — на WSL/Linux обычно
+# уже есть; поставить вручную (apt install rsync), если ansible упадёт на этом шаге.
+- name: Залить собранную статику Admin Client на целевой хост
+  ansible.posix.synchronize:
+    src: "{{ platform_admin_client_src_dir }}/dist/"
+    dest: /opt/admin-client-dist/
+    delete: true
+    rsync_opts:
+      - "--exclude=.git"
+  delegate_to: localhost
+
+- name: Запустить контейнер Admin Client, если ещё не запущен (nginx, только 127.0.0.1 — наружу через Caddy)
+  community.docker.docker_container:
+    name: admin-client
+    image: "{{ platform_admin_client_nginx_image }}"
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "127.0.0.1:{{ platform_admin_client_port }}:80"
+    volumes:
+      - /opt/admin-client-dist:/usr/share/nginx/html:ro
+    # Файлы — bind mount, не запечены в образ, так что nginx сразу отдаёт новую
+    # сборку без пересоздания контейнера; recreate не нужен.

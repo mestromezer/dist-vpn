@@ -1,0 +1,11 @@
+---
+# Тот же файл, что roles/agent_install/tasks/docker_python_deps.yml — см. этот файл
+# за полным обоснованием. Продублирован, а не вынесен в общую роль, чтобы обе роли
+# оставались самодостаточными (тот же принцип независимости ролей, что уже виден в
+# остальной части этого provisioning-дерева).
+- name: Установить python3-docker (Python-биндинги, нужны community.docker.*)
+  ansible.builtin.apt:
+    name: python3-docker
+    state: present
+    update_cache: true
+    cache_valid_time: 3600

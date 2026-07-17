@@ -1,0 +1,33 @@
+---
+- name: Создать каталоги для данных/конфига Caddy (персистентный внутренний CA/сертификаты)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /opt/caddy/data
+    - /opt/caddy/config
+
+- name: Сгенерировать Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /root/Caddyfile
+    owner: root
+    group: root
+    mode: "0644"
+  register: platform_caddyfile
+
+- name: Запустить/пересоздать контейнер Caddy
+  community.docker.docker_container:
+    name: caddy
+    image: "{{ platform_caddy_image }}"
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    recreate: "{{ platform_caddyfile.changed }}"
+    volumes:
+      - /root/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/caddy/data:/data
+      - /opt/caddy/config:/config

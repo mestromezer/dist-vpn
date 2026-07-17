@@ -65,6 +65,7 @@ ufw_allow_ssh: true
 role_firewall_rules:
   entry: []
   exit: []
+  platform: []
 
 # --- fail2ban (ТЗ-7 §3.3) ---
 fail2ban_bantime: 1h

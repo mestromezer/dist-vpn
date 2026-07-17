@@ -1,0 +1,48 @@
+---
+- name: Сгенерировать docker-compose.override.yml (секреты — POSTGRES_PASSWORD/PLATFORM_JWT_SECRET_KEY/PLATFORM_ENV)
+  ansible.builtin.template:
+    src: docker-compose.override.yml.j2
+    dest: "{{ platform_source_checkout_dir }}/platform/docker-compose.override.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Сгенерировать .env (host-порты/привязка 127.0.0.1, PLATFORM_MTLS_SERVER_SANS)
+  ansible.builtin.template:
+    src: docker-compose.env.j2
+    dest: "{{ platform_source_checkout_dir }}/platform/.env"
+    owner: root
+    group: root
+    mode: "0600"
+
+# Обычный `docker compose ... up -d --build` CLI, а не community.docker модуль —
+# намеренно: тот же самый двухфайловый (-f docker-compose.yml -f
+# docker-compose.override.yml) вызов уже был вручную проверен на реальном деплое
+# перед тем, как заворачивать в роль (см. defaults/main.yml и override-шаблон рядом
+# за тем, почему секреты идут именно так, а не через .env). changed_when: false —
+# `docker compose up` сам по себе идемпотентен (пересоздаёт контейнер только если
+# конфигурация реально изменилась), полагаться на него самого как источник факта
+# "changed" для Ansible не нужно.
+- name: "Поднять стек Platform (docker compose up -d --build)"
+  ansible.builtin.command:
+    cmd: >-
+      docker compose
+      -f {{ platform_source_checkout_dir }}/platform/docker-compose.yml
+      -f {{ platform_source_checkout_dir }}/platform/docker-compose.override.yml
+      up -d --build
+  changed_when: true
+  no_log: true
+
+- name: Дождаться готовности Postgres и старта процесса Platform
+  ansible.builtin.command:
+    cmd: >-
+      docker compose
+      -f {{ platform_source_checkout_dir }}/platform/docker-compose.yml
+      -f {{ platform_source_checkout_dir }}/platform/docker-compose.override.yml
+      ps --format json
+  register: platform_compose_ps
+  changed_when: false
+  until: "'\"Health\":\"healthy\"' in platform_compose_ps.stdout or 'running' in platform_compose_ps.stdout"
+  retries: 12
+  delay: 5

@@ -49,8 +49,46 @@ class AgentSettings(BaseSettings):
     # --- Platform connection ---
     platform_address: str = Field(
         default="localhost:50051",
-        description="Platform gRPC endpoint, host:port. Agent always dials out to this address.",
+        description=(
+            "Platform's STRICT mTLS gRPC endpoint, host:port - used for every "
+            "connection once this Agent has a persisted node identity (see "
+            "platform_enrollment_address below for the one connection that happens "
+            "before that)."
+        ),
     )
+
+    # Found while validating a real two-VDS deployment (not caught by mocked tests -
+    # see TESTING.md): Platform's gRPC server used to require a client cert on this
+    # same port unconditionally, which made bootstrap Enrollment structurally
+    # impossible (a brand-new Agent has no cert yet - that's the entire point of the
+    # one-time-token Enrollment RPC, control_client.py::run_session). Making the port
+    # optionally-certed instead turned out to be unsafe: grpc's C-core (confirmed
+    # against a real server, not just from docs) does not expose an *offered* client
+    # cert's bytes to the server application at all when client auth isn't required -
+    # so the server can't tell "no cert" from "a cert, just not verified" once it's
+    # optional, and a single port cannot be both "require a valid cert" and "cert
+    # optional" at the same time (that's a TLS handshake-time setting). Platform's
+    # fix (dist_vpn_platform.grpc_server.server, same commit as this field) is a
+    # SECOND listener with no client-cert requirement at all, used only for
+    # Enrollment - default here (`platform_address`'s port + 1) matches the
+    # convention documented on that server's `settings.grpc_enrollment_port` default;
+    # override independently only if the two are ever deployed on non-adjacent ports.
+    platform_enrollment_address: str | None = Field(
+        default=None,
+        description=(
+            "Platform's unauthenticated (no client cert) enrollment-only gRPC "
+            "endpoint, host:port. Defaults to platform_address with its port "
+            "incremented by 1 if left unset - only override this if Platform's two "
+            "ports aren't adjacent in your deployment."
+        ),
+    )
+
+    @property
+    def resolved_platform_enrollment_address(self) -> str:
+        if self.platform_enrollment_address is not None:
+            return self.platform_enrollment_address
+        host, _, port = self.platform_address.rpartition(":")
+        return f"{host}:{int(port) + 1}"
 
     # --- Enrollment (bootstrap only; single-use token, see TZ-4 SS5.2) ---
     enrollment_token: SecretStr = Field(

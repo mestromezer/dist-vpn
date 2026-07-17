@@ -31,7 +31,20 @@ class Settings(BaseSettings):
 
     # --- gRPC (Agent <-> Platform control plane) ---
     grpc_host: str = "0.0.0.0"
+    # Strict mTLS - require_client_auth=True (grpc_server/server.py). Every
+    # interaction except bootstrap Enrollment goes through this port.
     grpc_port: int = 50051
+    # No client cert required or checked - see grpc_server/server.py's module
+    # docstring for why this had to become a separate port rather than a mode on
+    # grpc_port: found while validating a real two-VDS deployment that grpc's C-core
+    # doesn't expose an *offered* client cert to the application at all once client
+    # auth isn't required, so one port can't safely be both "cert required" and
+    # "cert optional" - and Enrollment structurally cannot work without an optional
+    # path (a brand-new Agent has no cert yet). Default is grpc_port + 1; Agent's
+    # matching default (agent/src/dist_vpn_agent/config.py::
+    # resolved_platform_enrollment_address) mirrors this convention - override both
+    # together if you ever need them non-adjacent.
+    grpc_enrollment_port: int = 50052
     # Max message size guard so one misbehaving/overloaded node cannot degrade the others
     # (TZ-5 §5 - "здоровое ограничение на размер сообщения/буферов").
     grpc_max_message_bytes: int = 4 * 1024 * 1024

@@ -32,7 +32,12 @@ async def _run() -> None:
 
     logger.info(
         "platform_process_starting",
-        extra={"http_port": settings.http_port, "grpc_port": settings.grpc_port, "env": settings.env},
+        extra={
+            "http_port": settings.http_port,
+            "grpc_port": settings.grpc_port,
+            "grpc_enrollment_port": settings.grpc_enrollment_port,
+            "env": settings.env,
+        },
     )
     await asyncio.gather(uvicorn_server.serve(), serve_grpc())
 
