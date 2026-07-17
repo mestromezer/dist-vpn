@@ -46,6 +46,7 @@ from ipaddress import ip_address
 from pathlib import Path
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
@@ -395,3 +396,25 @@ def fingerprint_sha256_hex(cert_pem: bytes) -> str:
     TODO placeholder before this slice)."""
     certificate = x509.load_pem_x509_certificate(cert_pem)
     return certificate.fingerprint(hashes.SHA256()).hex()
+
+
+def verify_client_cert_pem(ca: CAMaterial, cert_pem: bytes) -> bool:
+    """True only if `cert_pem` is a certificate this CA itself issued (signature
+    chains directly to `ca.certificate`) and is currently within its validity period.
+
+    Needed because grpc_server/server.py binds with `require_client_auth=False` (see
+    its module docstring) - found, while wiring that up, that grpc's C-core does not
+    verify an *offered* client cert's chain of trust at all in that mode (that's
+    `GRPC_SSL_REQUEST_CLIENT_CERTIFICATE_BUT_DONT_VERIFY`, not "verify if offered" -
+    `require_client_auth=True` is the only mode that gets chain verification from
+    grpc/BoringSSL itself). `grpc_server/servicer.py::Session` calls this explicitly on
+    whatever PEM cert `context.auth_context()` reports for the peer, rather than
+    trusting `peer_identities()` alone, which only reflects "a cert was offered", not
+    "and it was ours"."""
+    try:
+        certificate = x509.load_pem_x509_certificate(cert_pem)
+        certificate.verify_directly_issued_by(ca.certificate)
+    except (ValueError, TypeError, InvalidSignature):
+        return False
+    now = datetime.now(timezone.utc)
+    return certificate.not_valid_before_utc <= now <= certificate.not_valid_after_utc
