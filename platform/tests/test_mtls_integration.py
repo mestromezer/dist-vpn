@@ -122,12 +122,17 @@ async def test_certified_client_can_interact_on_the_strict_listener(tmp_path, db
             # The strict listener never restricts message kinds (its transport layer
             # already guarantees a verified cert on anything reaching it at all) - a
             # Heartbeat over a real mTLS channel should just be accepted, not refused.
-            # There's no reply to a Heartbeat specifically (see servicer.py), so the
-            # meaningful assertion is that the call stays open rather than closing
-            # immediately the way the uncertified/untrusted cases below do.
-            await asyncio.sleep(0.2)
-            assert not call.done()
-            call.cancel()
+            # There's no reply to a Heartbeat specifically (see servicer.py), and
+            # _requests() closes the client's half of the stream right after its one
+            # message (a real Agent's stream stays open far longer - control_client.py
+            # - but ending cleanly rather than erroring once the request stream ends is
+            # exactly what this test needs): a clean EOF with OK status proves the
+            # listener actually processed the Heartbeat rather than rejecting the
+            # connection outright, the way the uncertified/untrusted cases below do
+            # (those never get this far - channel_ready() itself times out for them).
+            reply = await call.read()
+            assert reply == grpc.aio.EOF
+            assert await call.code() == grpc.StatusCode.OK
         finally:
             await channel.close()
     finally:

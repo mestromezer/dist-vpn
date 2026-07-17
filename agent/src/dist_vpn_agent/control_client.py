@@ -163,22 +163,28 @@ class ControlClient:
         why Platform now needs a *separate* port with no client-cert requirement at
         all for Enrollment to be possible. Once persisted (or an override cert is
         configured), every connection goes to the strict ``platform_address`` port.
+
+        ``insecure_dev_mode`` never does this split: it's a single-channel, no-TLS-at-
+        all dev/test escape hatch (a fake/local server on one address, nothing to be
+        strict *or* optional about) predating the two-port design, and every existing
+        test exercising it (tests/test_control_client.py) sets up exactly one server on
+        ``platform_address`` - so it always dials that address, unconditionally.
         """
+        if self._settings.insecure_dev_mode:
+            logger.warning(
+                "insecure_dev_mode=true: control-plane channel to %s is UNENCRYPTED "
+                "and UNAUTHENTICATED. This is a dev-only escape hatch and is unsafe "
+                "for production (TZ-4 SS5.2).",
+                self._settings.platform_address,
+            )
+            return grpc.aio.insecure_channel(self._settings.platform_address)
+
         no_client_identity = persisted is None and not self._settings.mtls_client_cert_path
         dial_address = (
             self._settings.resolved_platform_enrollment_address
             if no_client_identity
             else self._settings.platform_address
         )
-
-        if self._settings.insecure_dev_mode:
-            logger.warning(
-                "insecure_dev_mode=true: control-plane channel to %s is UNENCRYPTED "
-                "and UNAUTHENTICATED. This is a dev-only escape hatch and is unsafe "
-                "for production (TZ-4 SS5.2).",
-                dial_address,
-            )
-            return grpc.aio.insecure_channel(dial_address)
 
         ca_cert = (
             self._settings.mtls_ca_cert_path.read_bytes()

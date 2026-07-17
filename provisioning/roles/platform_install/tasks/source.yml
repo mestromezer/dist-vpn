@@ -1,0 +1,35 @@
+---
+# Тот же паттерн, что roles/agent_install/tasks/image.yml — см. этот файл /
+# provisioning/README.md "Agent: сборка образа — откуда и почему" за полным
+# обоснованием build_from_source. depth: 1 — та же оговорка тоже: если
+# platform_source_git_ref окажется "голым" commit SHA на сервере без
+# uploadpack.allowReachableSHA1InWant, эта задача может упасть — убрать depth как
+# надёжный fallback, если это станет проблемой на практике.
+- name: Установить git (нужен для клонирования репозитория)
+  ansible.builtin.apt:
+    name: git
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "Клонировать репозиторий на целевой хост, закреплённая версия {{ platform_source_git_ref }}"
+  ansible.builtin.git:
+    repo: "{{ platform_source_git_repo }}"
+    dest: "{{ platform_source_checkout_dir }}"
+    version: "{{ platform_source_git_ref }}"
+    force: true
+    depth: 1
+
+- name: Проверить, что закреплённая версия исходников содержит platform/docker-compose.yml
+  ansible.builtin.stat:
+    path: "{{ platform_source_checkout_dir }}/platform/docker-compose.yml"
+  register: platform_compose_stat
+
+- name: "Preflight: platform/docker-compose.yml присутствует в закреплённой версии"
+  ansible.builtin.assert:
+    that:
+      - platform_compose_stat.stat.exists
+    fail_msg: >-
+      platform/docker-compose.yml не найден в {{ platform_source_checkout_dir }}
+      на {{ platform_source_git_ref }}. Укажите platform_source_git_ref,
+      указывающий на версию репозитория, где platform/ уже существует.

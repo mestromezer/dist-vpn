@@ -56,6 +56,17 @@ def _server_options() -> list[tuple[str, int]]:
     ]
 
 
+# OWASP API4:2023 (Unrestricted Resource Consumption): the enrollment listener accepts
+# a stream from literally anyone with network access, no client cert to even make
+# opening one non-trivial - cheaper per-connection than the strict listener by design
+# (see module docstring). Per-process/per-connection stream caps are a second layer
+# behind the real mitigation (ufw connection-rate limiting on this port at the host
+# level, same pattern already used for SSH via fail2ban - see SECRETS-ROTATION.md /
+# deploy notes for the actual firewall rule); this alone would not stop a distributed
+# flood, but bounds how much of THIS process a single connection can occupy.
+_ENROLLMENT_MAX_CONCURRENT_STREAMS = 4
+
+
 def build_server() -> grpc.aio.Server:
     """Strict mTLS listener - every interaction except Enrollment."""
     server = grpc.aio.server(options=_server_options())
@@ -82,7 +93,9 @@ def build_server() -> grpc.aio.Server:
 
 def build_enrollment_server() -> grpc.aio.Server:
     """No-client-cert listener, Enrollment only - see module docstring."""
-    server = grpc.aio.server(options=_server_options())
+    server = grpc.aio.server(
+        options=[*_server_options(), ("grpc.max_concurrent_streams", _ENROLLMENT_MAX_CONCURRENT_STREAMS)]
+    )
     pb_grpc.add_AgentControlServicer_to_server(AgentControlServicer(enrollment_only=True), server)
 
     material = mtls_ca.get_mtls_material()

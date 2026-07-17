@@ -27,11 +27,20 @@ provisioning/
       vault.yml.example     — ФОРМА секретов (см. «Секреты и Vault» ниже)
     entry_nodes.yml         — role: entry
     exit_nodes.yml          — role: exit
+    platform_nodes.yml      — role: platform
   roles/
     base_hardening/         — пользователь, SSH, ufw, fail2ban, updates, chrony
     docker_install/         — Docker CE из официального apt-репозитория
     agent_install/          — Docker-контейнер Agent'а (сборка/pull образа,
                                enrollment через vault, проверка running)
+    platform_install/       — стек Platform (docker compose: db+сервис),
+                               Caddy (TLS reverse-proxy), сборка+деплой Admin
+                               Client, забор CA-сертификата на машину
+                               оператора — добавлен позже entry/exit, найдено
+                               при реальном деплое (см. roles/platform_install/
+                               defaults/main.yml за полным обоснованием: до
+                               этого Platform разворачивался только вручную
+                               по шагам deploy.md, невоспроизводимо)
   .gitignore                — паттерны, специфичные для provisioning (см. ниже)
   .ansible-lint, .yamllint  — конфигурация линтеров (см. «Что реально проверено»)
 ```
@@ -98,10 +107,63 @@ ansible-playbook -i inventory/hosts.ini site.yml \
 (`agent_platform_address` / `agent_enrollment_token` — не через `-e`, а из
 `group_vars/all/vault.yml`, см. «Секреты и Vault» ниже.)
 
-`~/platform-ca.pem` в примере выше не появляется само — см. «Bootstrap
-mTLS Agent↔Platform: операторский workflow» ниже за пошаговым описанием,
-откуда оператор физически берёт этот файл (кратко: Platform генерирует и
-логирует его при первом собственном деплое).
+`~/platform-ca.pem` в примере выше не появляется само — раньше это был
+отдельный ручной шаг (см. «Bootstrap mTLS Agent↔Platform: операторский
+workflow» ниже за историческим пошаговым описанием). С `roles/platform_install`
+он появляется автоматически: сама роль забирает CA-сертификат на машину
+оператора при первом деплое Platform (см. `platform_ca_cert_local_dest`,
+по умолчанию `~/platform-ca.pem` — совпадает с тем, что ожидают команды выше).
+
+### Platform — тот же поток, роль `platform`
+
+Разворачивается ПЕРВОЙ (у Agent'а при enrollment нет ещё ни CA-сертификата, ни
+enrollment-токена, взять их неоткуда, пока Platform не поднят):
+
+```bash
+ansible-playbook -i inventory/hosts.ini site.yml \
+  -l vds-platform-01 -e role=platform \
+  -e "provision_user_ssh_public_key=$(cat ~/.ssh/id_ed25519.pub)" \
+  -e @platform-extravars.json \
+  --ask-vault-pass
+```
+
+где `platform-extravars.json` (см. «⚠️ `-e "key=значение с пробелами"` теряет
+хвост» ниже за тем, почему JSON-файл, а не инлайн `-e`):
+
+```json
+{
+  "platform_source_git_repo": "git@github.com:<org>/dist-vpn.git",
+  "platform_source_git_ref": "<тег-или-commit-sha>"
+}
+```
+
+(`vault_platform_jwt_secret_key` / `vault_platform_postgres_password` — не
+через `-e`, а из `group_vars/all/vault.yml`, см. «Секреты и Vault» ниже.
+`platform_domain` — опционален, см. `roles/platform_install/defaults/
+main.yml`: пусто = временный самоподписанный сертификат Caddy.)
+
+После успешного прогона: enrollment-токены для entry/exit-нод выпускаются
+через REST API Platform (`POST /api/v1/nodes`, см. `platform/README.md`), не
+этим playbook'ом — provisioning entry/exit-нод и создание/раздача токенов
+остаются раздельными операциями, как и раньше.
+
+### ⚠️ `-e "key=значение с пробелами"` теряет хвост
+
+Найдено при реальном деплое: `ansible-playbook -e "provision_user_ssh_public_key=$(cat
+~/.ssh/id_ed25519.pub)"` (публичный SSH-ключ — строка вида `ssh-ed25519 AAAA... comment`,
+с пробелами) незаметно обрезался ansible-core до первого пробела —
+`ansible.posix.authorized_key` затем падал с невнятным `Module failed: list index out
+of range` (кривой парсинг усечённого ключа), а не понятной ошибкой валидации. Инлайн
+`-e "key=значение"` **безопасен только для значений без пробелов** (адреса, токены,
+теги) — для всего остального (SSH-ключи и любые многословные значения) используйте
+`-e @file.json`:
+
+```bash
+python3 -c 'import json; json.dump({"provision_user_ssh_public_key": open("'"$HOME"'/.ssh/id_ed25519.pub").read().strip()}, open("extravars.json", "w"))'
+ansible-playbook ... -e @extravars.json ...
+```
+
+(файл с секретами/ключами — не коммитить; тот же принцип, что и для `vault.yml`.)
 
 ## Секреты и Vault
 

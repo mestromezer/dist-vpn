@@ -31,7 +31,16 @@
 
 - name: "Роль-специфичные порты поверх SSH (role={{ role | default('unknown') }})"
   community.general.ufw:
-    rule: allow
+    # По умолчанию allow, но элемент списка может задать rule: limit — тот же
+    # механизм, которым сам ufw уже эффективно защищает SSH (community.general.ufw
+    # не трогает SSH-порт как limit сам по себе, но семантика identична тому, как
+    # fail2ban защищает SSH: ufw limit банит источник, слишком часто открывающий
+    # новые соединения). Используется platform_nodes (group_vars/platform_nodes.yml)
+    # для gRPC-портов Platform — найдено при аудите нового enrollment-порта
+    # (см. platform/src/dist_vpn_platform/grpc_server/server.py): порт, не
+    # требующий клиентского сертификата, обязан быть хотя бы rate-limited на
+    # уровне сети (OWASP API4:2023, Unrestricted Resource Consumption).
+    rule: "{{ item.rule | default('allow') }}"
     port: "{{ item.port | string }}"
     proto: "{{ item.proto | default('tcp') }}"
     comment: "{{ item.comment | default('role-specific: ' ~ role) }}"

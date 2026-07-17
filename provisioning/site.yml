@@ -1,23 +1,34 @@
 ---
-# Provisioning базовой подготовки VDS перед установкой Agent (ТЗ-7).
+# Provisioning базовой подготовки VDS (ТЗ-7) — Agent-ноды (entry/exit) И Platform,
+# одним и тем же однокомандным потоком.
 #
 # Запуск — см. provisioning/README.md, кратко:
 #   ansible-playbook -i inventory/hosts.ini site.yml -l <host> -e role=entry --ask-vault-pass
+#   ansible-playbook -i inventory/hosts.ini site.yml -l <host> -e role=platform --ask-vault-pass
 #
-# Роль ноды (entry|exit) — из group_vars (group_vars/entry_nodes.yml /
-# exit_nodes.yml, привязано к членству в группе инвентаря) либо явно через
-# -e role=entry|exit (extra-vars всегда приоритетнее group_vars в Ansible).
-# Используется ролями для роль-специфичного набора firewall-портов
-# (group_vars/entry_nodes.yml / group_vars/exit_nodes.yml — см. комментарии
-# там же за списком и обоснованием) и для AGENT_REQUESTED_ROLE, которую
-# читает контейнер Agent'а (roles/agent_install).
+# Роль ноды (entry|exit|platform) — из group_vars (group_vars/entry_nodes.yml /
+# exit_nodes.yml / platform_nodes.yml, привязано к членству в группе инвентаря)
+# либо явно через -e role=entry|exit|platform (extra-vars всегда приоритетнее
+# group_vars в Ansible). Используется ролями для роль-специфичного набора
+# firewall-портов (group_vars/*_nodes.yml — см. комментарии там же за списком и
+# обоснованием) и для AGENT_REQUESTED_ROLE, которую читает контейнер Agent'а
+# (roles/agent_install) — Platform не имеет эквивалента, платформа не "агент"
+# ни в каком смысле, роль здесь используется только для выбора набора ufw-правил
+# и финальной role-специфичной роли (agent_install vs platform_install) ниже.
+#
+# platform_install добавлен позже, чем entry/exit (найдено при валидации
+# реального деплоя на 3 VDS — см. README.md, "Platform — тот же поток, роль
+# platform", за подробностями): до этого Platform разворачивался вручную по
+# шагам из deploy.md, без
+# provisioning-автоматизации вообще, что делало добавление/пересоздание новой
+# инсталляции Platform медленным и невоспроизводимым в отличие от Agent-нод.
 #
 # SSH-хардненинг применяется ДО какой-либо иной настройки (ТЗ-7 §5) —
 # обеспечивается порядком ролей ниже (base_hardening всегда первая,
-# agent_install — последняя, т.к. ей нужен уже работающий Docker из
-# docker_install).
+# agent_install/platform_install — последняя, т.к. обеим нужен уже работающий
+# Docker из docker_install).
 
-- name: Базовая подготовка VDS перед установкой Agent
+- name: Базовая подготовка VDS (Agent-ноды и Platform)
   hosts: vds
   become: true
   gather_facts: true
@@ -29,22 +40,25 @@
           # Единое (не составное) условие — если "role" не задан вовсе,
           # короткое замыкание "and" не даёт Jinja упасть на "role in [...]"
           # с невнятной ошибкой вместо понятного fail_msg ниже.
-          - (role is defined) and (role in ['entry', 'exit'])
+          - (role is defined) and (role in ['entry', 'exit', 'platform'])
         fail_msg: >-
           Роль ноды не определена или некорректна
-          ({{ role | default('не задана') }}). Укажите -e role=entry|exit,
-          либо поместите хост в группу инвентаря entry_nodes/exit_nodes
+          ({{ role | default('не задана') }}). Укажите -e role=entry|exit|platform,
+          либо поместите хост в группу инвентаря entry_nodes/exit_nodes/platform_nodes
           (см. inventory/example.ini и group_vars/entry_nodes.yml,
-          group_vars/exit_nodes.yml).
+          group_vars/exit_nodes.yml, group_vars/platform_nodes.yml).
         success_msg: "Роль ноды: {{ role }}"
 
   roles:
     - role: base_hardening
     - role: docker_install
     - role: agent_install
+      when: role in ['entry', 'exit']
+    - role: platform_install
+      when: role == 'platform'
 
   post_tasks:
-    - name: "Диагностика: провижининг ноды завершён"
+    - name: "Диагностика: провижининг ноды завершён (role=entry|exit)"
       ansible.builtin.debug:
         msg: >-
           Провижининг ноды (роль: {{ role }}) завершён: базовая подготовка,
@@ -54,3 +68,15 @@
           Platform со статусом HEALTHY (ТЗ-7 §4.4/§7) — это отдельный,
           финальный шаг приёмки, который требует API Platform и пока не
           реализован здесь, см. README «Scope of this slice / TODO».
+      when: role in ['entry', 'exit']
+
+    - name: "Диагностика: провижининг Platform завершён (role=platform)"
+      ansible.builtin.debug:
+        msg: >-
+          Провижининг Platform завершён: базовая подготовка, Docker, Platform
+          собран и поднят из исходников (roles/platform_install), Caddy
+          настроен, Admin Client собран и задеплоен (roles/platform_install/
+          tasks/verify.yml подтвердил состояние). CA-сертификат для
+          распространения Agent-нодам — см. вывод роли выше или
+          /root/platform-ca.pem на этом хосте.
+      when: role == 'platform'

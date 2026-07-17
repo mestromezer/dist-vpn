@@ -1,0 +1,23 @@
+## {{ ansible_managed }}
+## Источник: roles/platform_install (найдено при валидации реального деплоя на 3 VDS —
+## см. defaults/main.yml). Не редактировать вручную, правки будут перезаписаны при
+## следующем прогоне.
+##
+## Существует ОТДЕЛЬНО от platform/docker-compose.yml (не патчит его на месте),
+## потому что POSTGRES_PASSWORD / PLATFORM_JWT_SECRET_KEY / PLATFORM_ENV в базовом
+## файле — литеральные значения ("platform" / "dev-only-insecure-secret-change-me" /
+## "dev"), не ${VAR:-default} подстановки, так что их нельзя переопределить только
+## через .env-файл (в отличие от портов ниже, в .env.j2 — те уже параметризованы в
+## базовом файле). docker compose корректно мёржит `environment` как map (ключ за
+## ключом), в отличие от списков вроде `ports`, где поведение мёржа менее
+## предсказуемо между версиями — проверено вручную на реальном деплое перед тем,
+## как заворачивать в роль.
+services:
+  db:
+    environment:
+      POSTGRES_PASSWORD: "{{ platform_postgres_password }}"
+  platform:
+    environment:
+      PLATFORM_DATABASE_URL: "postgresql+asyncpg://platform:{{ platform_postgres_password }}@db:5432/platform"
+      PLATFORM_JWT_SECRET_KEY: "{{ platform_jwt_secret_key }}"
+      PLATFORM_ENV: "prod"
