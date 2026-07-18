@@ -3,7 +3,24 @@
   Не редактировать вручную на хосте — правки будут перезаписаны при следующем прогоне.
 
   Официальная документация полей: https://xtls.github.io/en/config/transports/reality.html
-  (realitySettings) и https://xtls.github.io/en/config/protocols/vless.html (VLESS).
+  (realitySettings), https://xtls.github.io/en/config/protocols/vless.html (VLESS) и
+  https://xtls.github.io/en/config/outbounds/vless.html (XTLS Vision flow).
+
+  ⚠️ ИЗВЕСТНАЯ НЕРЕШЁННАЯ ПРОБЛЕМА (см. README.md "Control-plane через REALITY,
+  зачем" — раздел "Открытая проблема: устойчивый TLS-in-TLS поток из РФ" за полным
+  разбором): flow: "xtls-rprx-vision" был опробован как фикс, но НЕ включён здесь —
+  пробовался и был откачен в этой же сессии. Xray-core логирует "the pure TLS proxy
+  has certain TLS in TLS characters" без него, и офдокументация Vision прямо
+  говорит, что этот flow "eliminates TLS-in-TLS characteristics" (что теоретически
+  и есть наша ситуация — настоящий mTLS Agent<->Platform поверх VLESS+REALITY) — но
+  на практике Vision конфликтует с dokodemo-door-based архитектурой этого туннеля
+  (сервер стабильно отвечал "client flow is empty" даже при БУКВАЛЬНО идентичном
+  flow на обеих сторонах, с fragment/dialerProxy и без) — подозрение на
+  задокументированное ограничение Xray (dialerProxy не форвардит Vision-специфичные
+  маркеры потока корректно, а dokodemo-door, похоже, не даёt Vision нужный
+  низкоуровневый доступ к сырому сокету). НЕ включать flow здесь, пока это не
+  решено — включение при рассинхроне с клиентом ломает даже то, что сейчас
+  работает.
 
   Один VLESS+REALITY inbound на порту platform_control_gateway_port (443, тот же
   порт, что раньше держал Caddy — см. Caddyfile.j2 за переносом Caddy на loopback).
@@ -43,6 +60,10 @@
             "{{ platform_control_gateway_short_id }}"
           ]
         }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"]
       }
     }
   ],

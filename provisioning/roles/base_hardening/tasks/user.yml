@@ -29,12 +29,18 @@
     group: "{{ provision_user }}"
     mode: "0700"
 
+# ansible.posix.authorized_key 2.2.2 падает "list index out of range" на
+# Ubuntu 24.04 (найдено при реальном деплое, воспроизведено дважды) —
+# lineinfile даёт ту же идемпотентность (не дублирует строку при повторном
+# прогоне) без внешней collection-зависимости для этого шага.
 - name: Добавить публичный ключ оператора в authorized_keys
-  ansible.posix.authorized_key:
-    user: "{{ provision_user }}"
-    key: "{{ provision_user_ssh_public_key }}"
-    state: present
-    exclusive: false
+  ansible.builtin.lineinfile:
+    path: "/home/{{ provision_user }}/.ssh/authorized_keys"
+    line: "{{ provision_user_ssh_public_key }}"
+    create: true
+    owner: "{{ provision_user }}"
+    group: "{{ provision_user }}"
+    mode: "0600"
 
 - name: "Разрешить sudo без пароля (если включено) для {{ provision_user }}"
   ansible.builtin.copy:

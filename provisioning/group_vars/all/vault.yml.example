@@ -16,6 +16,17 @@
 # group_vars/all/vault.yml (реальный, зашифрованный файл) — в
 # provisioning/.gitignore, в репозиторий не попадает никогда.
 
+# GitHub Personal Access Token (fine-grained, read-only, scoped ТОЛЬКО на
+# репозиторий dist-vpn) — нужен, только если репозиторий приватный, для
+# клонирования исходников на целевые VDS (roles/agent_install/tasks/image.yml,
+# roles/platform_install/tasks/source.yml — agent_source_git_repo_authenticated/
+# platform_source_git_repo_authenticated встраивают его в HTTPS URL). Пусто —
+# клонирование пойдёт без аутентификации (репозиторий публичный). Создать:
+# GitHub -> Settings -> Developer settings -> Fine-grained personal access
+# tokens -> New token -> Repository access: Only select repositories -> этот
+# репозиторий -> Permissions: Contents: Read-only, больше ничего не давать.
+vault_github_pat: ""
+
 # Пароль sudo для provision_user, используемый САМИМ Ansible при
 # необходимости become на уже захарденной ноде (PasswordAuthentication no,
 # подключение только по ключу — но sudo внутри сессии может требовать пароль

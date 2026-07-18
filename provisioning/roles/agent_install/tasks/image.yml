@@ -19,12 +19,13 @@
 # проблемой на практике — убрать depth (полный clone) как надёжный fallback.
 - name: "Клонировать репозиторий на целевой хост, закреплённая версия {{ agent_source_git_ref }}"
   ansible.builtin.git:
-    repo: "{{ agent_source_git_repo }}"
+    repo: "{{ agent_source_git_repo_authenticated }}"
     dest: "{{ agent_source_checkout_dir }}"
     version: "{{ agent_source_git_ref }}"
     force: true
     depth: 1
   when: agent_image_source == 'build_from_source'
+  no_log: "{{ agent_source_github_pat | length > 0 }}"
 
 # Честная, конкретная проверка вместо непонятной ошибки docker build:
 # ЧЕСТНАЯ НАХОДКА этого слайса — agent/Dockerfile на момент написания этой

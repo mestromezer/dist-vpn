@@ -3,9 +3,22 @@
 # подтверждает, что процессы поднялись, НЕ подтверждает полную сквозную готовность
 # (например, что DNS для platform_domain уже резолвится, если он задан — Caddy
 # сам будет ретраить получение сертификата, пока это не так).
+#
+# Найдено фактическим деплоем: когда platform_control_gateway_enabled: true,
+# внешний https://{{ ansible_host }}/docs больше не бьёт в Caddy — порт 443
+# держит REALITY control-gateway, и неаутентифицированный запрос честно
+# проксируется на донора (см. Caddyfile.j2/control_gateway.yml) — раньше эта
+# проверка получала 404 от ЧУЖОГО сайта-донора, а не от нашего Caddy, и
+# ошибочно считалась провалом деплоя. Caddy в этом случае слушает только
+# loopback:platform_caddy_bind_port — проверяем именно его, задача при этом
+# всё ещё выполняется НА целевом хосте (без delegate_to), так что
+# "127.0.0.1" здесь — то же самое, что видит сам Caddy.
 - name: Проверить HTTP через Caddy (self-signed допустим — только код ответа)
   ansible.builtin.uri:
-    url: "https://{{ platform_domain if platform_domain else ansible_host }}/docs"
+    url: >-
+      {{ 'https://127.0.0.1:' ~ platform_caddy_bind_port ~ '/docs'
+         if platform_control_gateway_enabled
+         else 'https://' ~ (platform_domain if platform_domain else ansible_host) ~ '/docs' }}
     validate_certs: false
     status_code: 200
   register: platform_caddy_check
@@ -17,10 +30,11 @@
   ansible.builtin.debug:
     msg: >-
       [{{ inventory_hostname }}] Platform отвечает на
-      https://{{ platform_domain if platform_domain else ansible_host }}/docs
-      (HTTP {{ platform_caddy_check.status }}). Это подтверждает, что REST API
-      поднят и проксируется — НЕ то же самое, что "gRPC-порты 50051/50052
-      реально принимают Agent'ов" (для этого нужен реальный enrollment, см.
-      TESTING.md) или "Let's Encrypt-сертификат выпущен" (если задан
-      platform_domain — Caddy логирует это отдельно, проверьте `docker logs
-      caddy` при первом запуске).
+      {{ platform_caddy_check.url }} (HTTP {{ platform_caddy_check.status }}).
+      {{ 'Caddy на loopback (control-gateway держит публичный 443) — доступ снаружи через ssh -L, см. README.'
+         if platform_control_gateway_enabled else '' }}
+      Это подтверждает, что REST API поднят и проксируется — НЕ то же самое,
+      что "gRPC-порты 50051/50052 реально принимают Agent'ов" (для этого
+      нужен реальный enrollment, см. TESTING.md) или "Let's Encrypt-сертификат
+      выпущен" (если задан platform_domain — Caddy логирует это отдельно,
+      проверьте `docker logs caddy` при первом запуске).

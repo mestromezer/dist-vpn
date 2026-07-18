@@ -27,6 +27,22 @@ agent_source_git_ref: ""
 agent_source_checkout_dir: /opt/dist-vpn/agent-src
 agent_image_tag: dist-vpn-agent:local
 
+# Персональный токен GitHub (fine-grained, read-only, scoped ТОЛЬКО на этот
+# репозиторий) — нужен, только если agent_source_git_repo указывает на приватный
+# репозиторий. Пусто по умолчанию = клонирование без аутентификации (публичный
+# репозиторий, либо на целевом хосте уже настроен свой git credential helper —
+# маловероятно для одноразовой VDS, но не исключено). Общий с platform_install
+# (тот же репозиторий с исходниками) — см. group_vars/all/vault.yml.example.
+agent_source_github_pat: "{{ vault_github_pat | default('') }}"
+
+# Собранный на лету authenticated URL — используется ТОЛЬКО в задаче клонирования
+# (tasks/image.yml, no_log: true на этой задаче). Diagnostic-сообщения по-прежнему
+# используют agent_source_git_repo как есть (без токена) — токен никогда не должен
+# попасть в вывод Ansible.
+agent_source_git_repo_authenticated: >-
+  {{ agent_source_git_repo | regex_replace('^https://', 'https://' ~ agent_source_github_pat ~ '@')
+     if (agent_source_github_pat | length > 0) else agent_source_git_repo }}
+
 # --- registry: используется только если agent_image_source: registry ---
 # Пусто по умолчанию намеренно — этот путь пока нигде в проекте не
 # реализован (нет CI/CD, публикующего образ), см. README.
@@ -199,8 +215,13 @@ agent_control_plane_tunnel_local_enrollment_port: 15052
 # tasks/control_plane_tunnel.yml/шаблон за официальными ссылками на документацию) ---
 # Найдено фактическим тестированием этой сессии: голый VLESS+REALITY (без
 # фрагментации) не проходил ТСПУ вообще — полный TCP-хендшейк, но ноль байт
-# ClientHello. length "2-10" — рабочее значение, подтверждённое пользователем на
-# ДРУГОЙ, уже проверенной боевой связке (см. README.md за ссылкой на разбор) —
-# не выведено самостоятельно, взято из внешнего работающего примера.
-agent_control_plane_tunnel_fragment_length: "2-10"
+# ClientHello. Пользователь изначально давал "2-10" (рабочее значение на ДРУГОЙ,
+# уже проверенной боевой связке) — но по официальному Xray-core issue-трекеру
+# (github.com/XTLS/Xray-core, обсуждение фрагментации) минимальная длина для
+# packets: "tlshello" должна быть от 6, не от 2 — "2-10" технически ниже
+# рекомендованного минимума. "100-200" эмпирически показал больше успешно
+# переданных байт в тестах этой сессии (см. README за полным разбором,
+# "Открытая проблема: устойчивый TLS-in-TLS поток из РФ") — используется как
+# дефолт до дальнейшей проверки.
+agent_control_plane_tunnel_fragment_length: "100-200"
 agent_control_plane_tunnel_fragment_interval: "10-20"
