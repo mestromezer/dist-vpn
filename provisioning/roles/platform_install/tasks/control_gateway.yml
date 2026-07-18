@@ -1,0 +1,82 @@
+---
+# Control-plane REALITY gateway — см. defaults/main.yml (platform_control_gateway_*)
+# за полным обоснованием. Выполняется только когда platform_control_gateway_enabled:
+# true (по умолчанию false — явный opt-in, тот же принцип, что agent_insecure_dev_mode).
+
+## Preflight-проверка обязательных значений — см. tasks/preflight.yml (запускается
+## первой — не дублируется здесь).
+
+- name: Создать каталог конфига control-gateway
+  ansible.builtin.file:
+    path: /opt/dist-vpn-control-gateway
+    state: directory
+    owner: "{{ platform_control_gateway_container_uid }}"
+    group: "{{ platform_control_gateway_container_gid }}"
+    mode: "0700"
+  when: platform_control_gateway_enabled | bool
+
+# owner/group = UID/GID образа (не root:root) — см. defaults/main.yml
+# platform_control_gateway_container_uid за тем, как это найдено: официальный
+# distroless-образ Xray-core работает под non-root UID 65532, bind-mount не
+# транслирует владельца между хостом и контейнером, root:root на хосте делал файл
+# нечитаемым внутри контейнера (permission denied, restart loop).
+- name: Сгенерировать конфиг control-gateway (Xray REALITY inbound)
+  ansible.builtin.template:
+    src: control-gateway-config.json.j2
+    dest: /opt/dist-vpn-control-gateway/config.json
+    owner: "{{ platform_control_gateway_container_uid }}"
+    group: "{{ platform_control_gateway_container_gid }}"
+    mode: "0600"
+  register: platform_control_gateway_config
+  no_log: true
+  when: platform_control_gateway_enabled | bool
+
+# Найдено этой же сессией фактическим деплоем: образ работает под non-root UID
+# 65532 (см. platform_control_gateway_container_uid) и с network_mode: host падал
+# "permission denied" на bind {{ platform_control_gateway_port }} (<1024,
+# привилегированный порт) — сначала пробовал точечную capability
+# (docker_container: capabilities: [NET_BIND_SERVICE]), но она не сработала сама
+# по себе (возможные причины — распространение ambient-capability для non-root
+# ENTRYPOINT в конкретной связке runc/ядра, не выяснено до конца, не стоило
+# дальнейшей отладки при наличии рабочей альтернативы). Рабочий фикс — снизить
+# порог привилегированных портов для ВСЕГО хоста: net.ipv4.ip_unprivileged_port_start
+# делает 443+ доступным для bind любому непривилегированному процессу (порты <443,
+# включая 22/80, остаются привилегированными). Шире, чем capability на один
+# контейнер, но стандартный, задокументированный приём именно для non-root
+# Xray/nginx на 443 — подтверждено работающим на живом VDS-A этой сессией.
+- name: "Разрешить (persistent) bind непривилегированных процессов на порты >= {{ platform_control_gateway_port }}"
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_unprivileged_port_start
+    value: "{{ platform_control_gateway_port }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  when: platform_control_gateway_enabled | bool
+
+# network_mode: host — REALITY inbound должен слушать реальный публичный интерфейс
+# на platform_control_gateway_port (443), тот же порт, который раньше держал Caddy
+# (см. Caddyfile.j2 за переносом Caddy на loopback:platform_caddy_bind_port).
+# outbound-запросы (freedom -> 127.0.0.1:50051/50052) тоже проще всего с host-сетью:
+# "127.0.0.1" внутри контейнера с network_mode: host — это ДЕЙСТВИТЕЛЬНО хостовый
+# loopback (тот же класс гочи с сетевыми неймспейсами, что уже ловили в этом
+# провижининге — см. README "host.docker.internal / контейнерные сети" — здесь он
+# просто не возникает благодаря network_mode: host, а не обходится дополнительным
+# мостом).
+- name: Запустить/пересоздать control-gateway (официальный образ Xray-core)
+  community.docker.docker_container:
+    name: "{{ platform_control_gateway_container_name }}"
+    image: "{{ platform_control_gateway_image }}"
+    command: ["run", "-c", "/etc/xray/config.json"]
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    recreate: "{{ platform_control_gateway_config.changed }}"
+    volumes:
+      - /opt/dist-vpn-control-gateway/config.json:/etc/xray/config.json:ro
+  when: platform_control_gateway_enabled | bool
+
+- name: "Остановить control-gateway, если выключен (platform_control_gateway_enabled: false)"
+  community.docker.docker_container:
+    name: "{{ platform_control_gateway_container_name }}"
+    state: absent
+  when: not (platform_control_gateway_enabled | bool)

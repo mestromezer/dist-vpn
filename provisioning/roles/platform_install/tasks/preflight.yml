@@ -27,3 +27,18 @@
       не задаёт для них значений по умолчанию — тот же принцип, что и
       agent_platform_address/agent_enrollment_token в roles/agent_install.
   no_log: true
+
+- name: "Preflight (control-plane REALITY gateway): обязательные значения заданы"
+  ansible.builtin.assert:
+    that:
+      - platform_control_gateway_private_key | length > 0
+      - platform_control_gateway_short_id | length > 0
+      - platform_control_gateway_client_uuid | length > 0
+    fail_msg: >-
+      platform_control_gateway_enabled: true, но
+      vault_control_gateway_reality_private_key / vault_control_gateway_reality_short_id /
+      vault_control_gateway_client_uuid не заданы в group_vars/all/vault.yml —
+      см. этот файл за инструкцией по генерации (тем же кодом, что уже генерирует
+      REALITY-ключи для пользовательских каскадов Platform,
+      security/reality_keys.py).
+  when: platform_control_gateway_enabled | bool

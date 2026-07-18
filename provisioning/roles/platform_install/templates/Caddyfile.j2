@@ -1,8 +1,20 @@
 # {{ ansible_managed }}
-# Источник: roles/platform_install (defaults/main.yml: platform_domain). Не
-# редактировать вручную.
+# Источник: roles/platform_install (defaults/main.yml: platform_domain,
+# platform_control_gateway_enabled). Не редактировать вручную.
 #
-{% if platform_domain %}
+{% if platform_control_gateway_enabled %}
+# platform_control_gateway_enabled: true — control-gateway (Xray REALITY, см.
+# tasks/control_gateway.yml) забрал публичный 443 под control-plane-туннель для
+# entry-нод в РФ. Caddy уходит на loopback:{{ platform_caddy_bind_port }} — снаружи
+# больше не достать напрямую, доступ только через SSH-port-forward оператора:
+#   ssh -L {{ platform_caddy_bind_port }}:127.0.0.1:{{ platform_caddy_bind_port }} <алиас хоста>
+# затем https://localhost:{{ platform_caddy_bind_port }} в браузере, пока сессия
+# открыта. `platform_domain`/ACME здесь не имеет смысла (порт 80 наружу больше не
+# смотрит) — если понадобится реальный домен, control_gateway придётся сначала
+# выключить и вернуть Caddy на публичный 443.
+127.0.0.1:{{ platform_caddy_bind_port }} {
+    tls internal
+{% elif platform_domain %}
 # platform_domain задан — Caddy сам получит настоящий Let's Encrypt-сертификат.
 # Требует, чтобы DNS-запись {{ platform_domain }} уже указывала на {{ ansible_host }}
 # ДО первого запуска Caddy (иначе ACME HTTP-01 challenge не пройдёт).
@@ -11,8 +23,8 @@
 # platform_domain НЕ задан — Caddy поднимается на `tls internal` (самоподписанный
 # сертификат, сгенерированный самим Caddy). Рабочий канал, но браузер предупредит о
 # недоверенном сертификате, пока оператор не импортирует корневой сертификат Caddy
-# вручную. См. SECRETS-ROTATION.md, maintenance-пункт "перейти на Let's Encrypt, когда
-# появится домен" — тогда просто задать platform_domain и перепрогнать эту роль.
+# вручную. Maintenance-пункт "перейти на Let's Encrypt, когда появится домен" —
+# тогда просто задать platform_domain и перепрогнать эту роль.
 {{ ansible_host }} {
     tls internal
 {% endif %}

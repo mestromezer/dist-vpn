@@ -89,3 +89,22 @@
       agent/src/dist_vpn_agent/config.py на стороне самого Agent'а —
       клиентский сертификат без ключа или наоборот не образует рабочую
       TLS-идентичность).
+
+- name: "Preflight (control-plane REALITY-туннель): обязательные значения заданы"
+  ansible.builtin.assert:
+    that:
+      - agent_control_plane_tunnel_gateway_address | length > 0
+      - agent_control_plane_tunnel_public_key | length > 0
+      - agent_control_plane_tunnel_short_id | length > 0
+      - agent_control_plane_tunnel_client_uuid | length > 0
+    fail_msg: >-
+      agent_control_plane_tunnel_enabled: true, но
+      agent_control_plane_tunnel_gateway_address не удалось вывести из
+      agent_platform_address (см. defaults/main.yml), либо
+      vault_control_gateway_reality_public_key / vault_control_gateway_reality_short_id /
+      vault_control_gateway_client_uuid не заданы в group_vars/all/vault.yml. Эти три
+      vault-значения должны БУКВАЛЬНО совпадать с тем, что сгенерировано на стороне
+      platform_install (roles/platform_install/tasks/control_gateway.yml) — публичный
+      ключ и shortId парные к приватному ключу control-gateway'я, uuid — тот же
+      клиентский id, который control-gateway пускает в свой inbound.
+  when: agent_control_plane_tunnel_enabled | bool
