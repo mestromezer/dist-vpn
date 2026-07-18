@@ -14,11 +14,12 @@
 
 - name: "Клонировать репозиторий на целевой хост, закреплённая версия {{ platform_source_git_ref }}"
   ansible.builtin.git:
-    repo: "{{ platform_source_git_repo }}"
+    repo: "{{ platform_source_git_repo_authenticated }}"
     dest: "{{ platform_source_checkout_dir }}"
     version: "{{ platform_source_git_ref }}"
     force: true
     depth: 1
+  no_log: "{{ platform_source_github_pat | length > 0 }}"
 
 - name: Проверить, что закреплённая версия исходников содержит platform/docker-compose.yml
   ansible.builtin.stat:

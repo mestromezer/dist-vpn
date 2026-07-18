@@ -16,6 +16,13 @@ platform_source_git_repo: ""
 platform_source_git_ref: ""
 platform_source_checkout_dir: /opt/dist-vpn/platform-src
 
+# См. roles/agent_install/defaults/main.yml (agent_source_github_pat) за полным
+# обоснованием — тот же общий токен, тот же репозиторий.
+platform_source_github_pat: "{{ vault_github_pat | default('') }}"
+platform_source_git_repo_authenticated: >-
+  {{ platform_source_git_repo | regex_replace('^https://', 'https://' ~ platform_source_github_pat ~ '@')
+     if (platform_source_github_pat | length > 0) else platform_source_git_repo }}
+
 # --- Порты Platform (совпадают с дефолтами platform/.env.example /
 # platform/docker-compose.yml — единый источник истины для самих значений; эта роль
 # лишь передаёт их дальше в шаблон docker-compose.override.yml.j2 и в ufw-правила
