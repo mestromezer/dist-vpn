@@ -21,6 +21,9 @@
 - name: Забрать CA-сертификат Platform на машину оператора
   ansible.builtin.import_tasks: ca_cert.yml
 
+- name: Настроить control-plane REALITY gateway (Agent<->Platform для entry-нод в РФ)
+  ansible.builtin.import_tasks: control_gateway.yml
+
 - name: Настроить Caddy (TLS reverse-proxy перед REST API и Admin Client)
   ansible.builtin.import_tasks: caddy.yml
 

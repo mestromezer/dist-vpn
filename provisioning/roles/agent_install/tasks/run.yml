@@ -189,12 +189,26 @@
 # defaults/main.yml). Фикс -- не передавать эти переменные в контейнер ВООБЩЕ,
 # когда они не заданы, а не передавать их пустой строкой: тогда
 # pydantic-settings использует свой Python-default (None), а не коэрсит строку.
+# Когда control-plane-туннель включён (agent_control_plane_tunnel_enabled, см.
+# defaults/main.yml), Agent должен дозваниваться не до настоящего адреса Platform
+# (тот самый путь, который режет ТСПУ), а до локального dokodemo-door sidecar'а на
+# loopback (tasks/control_plane_tunnel.yml запустится ПОСЛЕ этого файла и разделит
+# с Agent'ом сетевой неймспейс). Переопределяем здесь, а не полагаемся на то, что
+# оператор вручную синхронизирует agent_platform_address с этим фактом в vault —
+# один флаг должен быть достаточным, без риска рассинхронизации.
+- name: "Определить эффективный AGENT_PLATFORM_ADDRESS (локальный туннель либо прямой адрес)"
+  ansible.builtin.set_fact:
+    agent_effective_platform_address: >-
+      {{ ('127.0.0.1:' ~ agent_control_plane_tunnel_local_strict_port)
+         if (agent_control_plane_tunnel_enabled | bool)
+         else agent_platform_address }}
+
 - name: Собрать переменные окружения контейнера Agent'а (см. коммент выше про Path('') != None)
   ansible.builtin.set_fact:
     agent_container_env: >-
       {{
         {
-          'AGENT_PLATFORM_ADDRESS': agent_platform_address,
+          'AGENT_PLATFORM_ADDRESS': agent_effective_platform_address,
           'AGENT_ENROLLMENT_TOKEN': agent_enrollment_token,
           'AGENT_HOSTNAME': inventory_hostname,
           'AGENT_REQUESTED_ROLE': agent_requested_role,

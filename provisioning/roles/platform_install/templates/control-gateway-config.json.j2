@@ -1,0 +1,77 @@
+{#
+  Источник: roles/platform_install (defaults/main.yml: platform_control_gateway_*).
+  Не редактировать вручную на хосте — правки будут перезаписаны при следующем прогоне.
+
+  Официальная документация полей: https://xtls.github.io/en/config/transports/reality.html
+  (realitySettings) и https://xtls.github.io/en/config/protocols/vless.html (VLESS).
+
+  Один VLESS+REALITY inbound на порту platform_control_gateway_port (443, тот же
+  порт, что раньше держал Caddy — см. Caddyfile.j2 за переносом Caddy на loopback).
+  routing ограничивает то, куда авторизованный клиент вообще может дотянуться —
+  ТОЛЬКО собственные gRPC-порты Platform на loopback, не открытый прокси наружу.
+#}
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "control-gateway-in",
+      "listen": "0.0.0.0",
+      "port": {{ platform_control_gateway_port }},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "{{ platform_control_gateway_client_uuid }}",
+            "flow": ""
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "{{ platform_control_gateway_donor }}:443",
+          "serverNames": [
+            "{{ platform_control_gateway_donor }}"
+          ],
+          "privateKey": "{{ platform_control_gateway_private_key }}",
+          "shortIds": [
+            "{{ platform_control_gateway_short_id }}"
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "to-platform-loopback",
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole",
+      "settings": {}
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["control-gateway-in"],
+        "ip": ["127.0.0.1"],
+        "port": "{{ platform_grpc_port }},{{ platform_grpc_enrollment_port }}",
+        "outboundTag": "to-platform-loopback"
+      },
+      {
+        "type": "field",
+        "inboundTag": ["control-gateway-in"],
+        "outboundTag": "block"
+      }
+    ]
+  }
+}

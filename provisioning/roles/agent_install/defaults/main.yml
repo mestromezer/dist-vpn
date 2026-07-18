@@ -142,3 +142,65 @@ agent_xray_config_host_path: "{{ agent_xray_config_host_dir }}/xray-config.json"
 # dist-vpn-agent:local` на реальной сборке этой роли.
 agent_container_uid: 999
 agent_container_gid: 999
+
+# --- Control-plane REALITY sidecar (roles/agent_install/tasks/control_plane_tunnel.yml) ---
+# Найдено фактическим tcpdump-диагностированием этой сессии (см.
+# provisioning/README.md, "Control-plane через REALITY, зачем"): ТСПУ пропускает
+# TCP-хендшейк к 50051/50052, но режет первый пакет с данными (TLS ClientHello) —
+# на entry-нодах в РФ прямое соединение Agent'а с Platform не держится. Заворачиваем
+# его в тот же VLESS+REALITY, что уже доказанно проходит для пользовательского
+# data-plane (platform/src/dist_vpn_platform/services/xray_templates.py).
+#
+# false по умолчанию — тот же принцип явного opt-in, что agent_insecure_dev_mode:
+# включать только на нодах, которые реально в зоне действия такой фильтрации
+# (сейчас — РФ), не везде по умолчанию.
+agent_control_plane_tunnel_enabled: false
+
+agent_control_plane_tunnel_image: "ghcr.io/xtls/xray-core:latest"  # см. platform_control_gateway_image за обоснованием выбора образа
+agent_control_plane_tunnel_container_name: dist-vpn-control-tunnel
+
+# Тот же UID/GID, тем же способом найденный (docker inspect живого контейнера на
+# VDS-A) — см. platform_control_gateway_container_uid за полным обоснованием.
+agent_control_plane_tunnel_container_uid: 65532
+agent_control_plane_tunnel_container_gid: 65532
+
+# Публичный адрес/IP control-gateway'я (Platform-нода) и REALITY-идентичность,
+# которую он ожидает — публичный ключ/shortId/uuid ДОЛЖНЫ совпадать с тем, что
+# сгенерировано на стороне platform_install (platform_control_gateway_private_key
+# и т.д. — приватный ключ туда, публичный сюда, см. тот defaults/main.yml).
+#
+# Выведен из agent_platform_address (уже задан в vault.yml — тот же хост, на
+# который entry-нода и так слала бы прямой gRPC-трафик, control-gateway просто
+# слушает другой порт на нём же), а не заведён отдельной переменной — избегает и
+# дублирования, и вопроса "где хранить публичный IP, чтобы не закоммитить его в
+# group_vars" (agent_platform_address уже решает это, живя в vault.yml, не в
+# committed group_vars). split(':')[0] — простое отделение host от host:port,
+# ДОЛЖЕН работать и для IPv4, и для hostname (agent_platform_address не ожидает
+# IPv6 без скобок нигде в проекте — тот же формат, что уже использует
+# resolved_platform_enrollment_address в agent/config.py). Переопределяемо, если
+# control-gateway когда-нибудь окажется на другом хосте, чем сама Platform.
+agent_control_plane_tunnel_gateway_address: "{{ agent_platform_address.split(':')[0] if (agent_platform_address | default('')) | length > 0 else '' }}"
+agent_control_plane_tunnel_public_key: "{{ vault_control_gateway_reality_public_key | default('') }}"
+agent_control_plane_tunnel_short_id: "{{ vault_control_gateway_reality_short_id | default('') }}"
+agent_control_plane_tunnel_client_uuid: "{{ vault_control_gateway_client_uuid | default('') }}"
+agent_control_plane_tunnel_donor: "img.yandex.ru"  # ДОЛЖЕН совпадать с platform_control_gateway_donor
+
+# Локальные loopback-порты, на которые Agent реально дозванивается (dokodemo-door
+# внутри туннеля превращает "подключение сюда" в "запрос до Platform на другом конце
+# REALITY-канала" — см. tasks/control_plane_tunnel.yml). +1 конвенция между строгим
+# и enrollment-портом сохранена намеренно: agent/src/dist_vpn_agent/config.py
+# (resolved_platform_enrollment_address) сама выведет 15052 из 15051, раз уже
+# существует для реальных host:port Platform — код Agent'а не пришлось менять
+# вообще, только AGENT_PLATFORM_ADDRESS (см. tasks/run.yml).
+agent_control_plane_tunnel_local_strict_port: 15051
+agent_control_plane_tunnel_local_enrollment_port: 15052
+
+# --- Фрагментация TLS ClientHello (freedom outbound + sockopt.dialerProxy, см.
+# tasks/control_plane_tunnel.yml/шаблон за официальными ссылками на документацию) ---
+# Найдено фактическим тестированием этой сессии: голый VLESS+REALITY (без
+# фрагментации) не проходил ТСПУ вообще — полный TCP-хендшейк, но ноль байт
+# ClientHello. length "2-10" — рабочее значение, подтверждённое пользователем на
+# ДРУГОЙ, уже проверенной боевой связке (см. README.md за ссылкой на разбор) —
+# не выведено самостоятельно, взято из внешнего работающего примера.
+agent_control_plane_tunnel_fragment_length: "2-10"
+agent_control_plane_tunnel_fragment_interval: "10-20"

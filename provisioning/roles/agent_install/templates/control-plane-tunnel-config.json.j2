@@ -1,0 +1,111 @@
+{#
+  Источник: roles/agent_install (defaults/main.yml: agent_control_plane_tunnel_*).
+  Не редактировать вручную на хосте — правки будут перезаписаны при следующем прогоне.
+
+  Официальная документация полей: https://xtls.github.io/en/config/transports/reality.html
+  (realitySettings, клиентская сторона: fingerprint/serverName/publicKey/shortId),
+  https://xtls.github.io/en/config/inbounds/dokodemo.html (dokodemo-door) и
+  https://xtls.github.io/en/config/outbounds/freedom.html (fragment) +
+  https://xtls.github.io/en/config/transports/sockopt.html (dialerProxy).
+
+  fragment/dialerProxy — найдено фактическим тестированием этой сессии (см.
+  README.md "Control-plane через REALITY, зачем"): голый VLESS+REALITY (без
+  фрагментации) НЕ проходил ТСПУ — tcpdump на Platform-ноде показывал полный TCP-
+  хендшейк, но ноль байт TLS ClientHello. Раздельный freedom-outbound с
+  settings.fragment, подключенный через streamSettings.sockopt.dialerProxy
+  ПЕРЕД основным REALITY outbound'ом (официальный задокументированный паттерн
+  именно для этого случая), решил проблему — ClientHello, раздробленный на мелкие
+  TCP-фрагменты, доходит и разбирается control-gateway'ем без ошибок.
+
+  Два dokodemo-door inbound'а на loopback — Agent реально дозванивается сюда
+  (AGENT_PLATFORM_ADDRESS=127.0.0.1:{{ agent_control_plane_tunnel_local_strict_port }},
+  см. tasks/run.yml). dokodemo-door превращает "подключение на этот локальный порт" в
+  "запрос до address:port ниже", который routing отправляет в единственный outbound —
+  VLESS+REALITY до control-gateway'я на Platform. Контейнер запускается с
+  network_mode: "container:{{ agent_container_name }}" (см. tasks/control_plane_tunnel.yml),
+  так что "127.0.0.1" здесь и в Agent'е — буквально один и тот же loopback.
+#}
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "tunnel-in-strict",
+      "listen": "127.0.0.1",
+      "port": {{ agent_control_plane_tunnel_local_strict_port }},
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 50051,
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tunnel-in-enrollment",
+      "listen": "127.0.0.1",
+      "port": {{ agent_control_plane_tunnel_local_enrollment_port }},
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 50052,
+        "network": "tcp"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "to-control-gateway",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "{{ agent_control_plane_tunnel_gateway_address }}",
+            "port": 443,
+            "users": [
+              {
+                "id": "{{ agent_control_plane_tunnel_client_uuid }}",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "fingerprint": "chrome",
+          "serverName": "{{ agent_control_plane_tunnel_donor }}",
+          "publicKey": "{{ agent_control_plane_tunnel_public_key }}",
+          "shortId": "{{ agent_control_plane_tunnel_short_id }}"
+        },
+        "sockopt": {
+          "dialerProxy": "fragment-out"
+        }
+      }
+    },
+    {
+      "tag": "fragment-out",
+      "protocol": "freedom",
+      "settings": {
+        "fragment": {
+          "packets": "tlshello",
+          "length": "{{ agent_control_plane_tunnel_fragment_length }}",
+          "interval": "{{ agent_control_plane_tunnel_fragment_interval }}"
+        }
+      }
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["tunnel-in-strict", "tunnel-in-enrollment"],
+        "outboundTag": "to-control-gateway"
+      }
+    ]
+  }
+}

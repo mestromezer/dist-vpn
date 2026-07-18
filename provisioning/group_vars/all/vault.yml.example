@@ -69,3 +69,31 @@ vault_platform_jwt_secret_key: "CHANGE_ME_generate_with_openssl_rand_-base64_32"
 # Пароль пользователя Postgres `platform` (роль db в platform/docker-compose.yml).
 # Сгенерировать: openssl rand -base64 24
 vault_platform_postgres_password: "CHANGE_ME_generate_with_openssl_rand_-base64_24"
+
+# --- Control-plane REALITY (roles/platform_install/tasks/control_gateway.yml +
+# roles/agent_install/tasks/control_plane_tunnel.yml) --- Нужны, только если хотя бы
+# одна entry-нода включает agent_control_plane_tunnel_enabled: true (см.
+# provisioning/README.md, "Control-plane через REALITY, зачем" — обход
+# ТСПУ-фильтрации control-plane канала для нод в РФ). Один общий комплект ключей
+# на весь control-gateway (не per-node) — см. честную оговорку в
+# roles/platform_install/defaults/main.yml (platform_control_gateway_client_uuid)
+# за тем, что это упрощает и чем платит.
+#
+# Сгенерировать пару ключ+shortId ТЕМ ЖЕ кодом, что уже генерирует REALITY-ключи
+# для пользовательских каскадов Platform (гарантированно верная кодировка для
+# Xray-core — см. platform/src/dist_vpn_platform/security/reality_keys.py):
+#   cd platform && python3 -c "
+#   import sys; sys.path.insert(0, 'src')
+#   from dist_vpn_platform.security.reality_keys import generate_reality_keypair, generate_short_id
+#   priv, pub = generate_reality_keypair()
+#   print(f'private={priv}\npublic={pub}\nshort_id={generate_short_id()}')"
+# private -> vault_control_gateway_reality_private_key (ТОЛЬКО на Platform-ноде).
+# public  -> vault_control_gateway_reality_public_key (на entry-нодах, не секрет
+#            сам по себе, но храним рядом для единообразия).
+vault_control_gateway_reality_private_key: "CHANGE_ME_generate_reality_keypair_see_comment_above"
+vault_control_gateway_reality_public_key: "CHANGE_ME_generate_reality_keypair_see_comment_above"
+vault_control_gateway_reality_short_id: "CHANGE_ME_generate_short_id_see_comment_above"
+
+# VLESS-клиентский uuid, которым entry-ноды представляются control-gateway'ю.
+# Сгенерировать: python3 -c "import uuid; print(uuid.uuid4())"
+vault_control_gateway_client_uuid: "CHANGE_ME_generate_with_python_uuid.uuid4"

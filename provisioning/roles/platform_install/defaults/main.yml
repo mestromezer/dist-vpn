@@ -74,3 +74,85 @@ platform_admin_client_nginx_image: nginx:alpine
 # старта. Передайте этот путь как agent_mtls_ca_cert_src при последующем
 # провижининге entry/exit-нод (roles/agent_install).
 platform_ca_cert_local_dest: "~/platform-ca.pem"
+
+# --- Control-plane REALITY gateway (roles/platform_install/tasks/control_gateway.yml) ---
+# Найдено фактическим tcpdump-диагностированием (см. provisioning/README.md,
+# "Control-plane через REALITY, зачем"): ТСПУ пропускает голый TCP-хендшейк к
+# 50051/50052, но режет первый же пакет с данными (TLS ClientHello) — self-signed
+# сертификат без домена к тому же сам по себе похож на паттерн, по которому
+# фильтруют. Обычный домен+Let's Encrypt здесь не помог бы надёжно (см. июнь-2026
+# статьи про переход ТСПУ на поведенческий fingerprinting, а не только SNI/сертификат) —
+# вместо этого заворачиваем control-plane трафик в тот же VLESS+REALITY, что уже
+# доказанно проходит (services/xray_templates.py, security/reality_keys.py на
+# стороне Platform — тот же код используется для генерации ключей ниже).
+#
+# false по умолчанию — тот же принцип "явный opt-in", что и agent_insecure_dev_mode:
+# включать только когда реально нужно (появилась entry-нода в РФ), а не всегда.
+# Когда true — Caddy ОБЯЗАН уйти на loopback (см. platform_caddy_bind_*
+# ниже/Caddyfile.j2), т.к. control-gateway забирает себе публичный 443.
+platform_control_gateway_enabled: false
+
+# Официальный образ Xray-core (github.com/XTLS/Xray-core/pkgs/container/xray-core) —
+# без прав root внутри, без shell, публикуется самим XTLS org, не сторонней сборкой.
+# Без закреплённой версии (:latest) — тот же класс компромисса, что и
+# agent_docker_proxy_image/platform_caddy_image (нет собственного пайплайна, публикующего
+# закреплённый тег) — оператор должен закрепить версию сам перед production-раскаткой.
+platform_control_gateway_image: "ghcr.io/xtls/xray-core:latest"
+platform_control_gateway_container_name: dist-vpn-control-gateway
+platform_control_gateway_port: 443
+
+# UID/GID официального образа Xray-core — distroless "nonroot" база (WorkingDir
+# /home/nonroot в docker inspect подтверждает это), без shell/`id` внутри, поэтому
+# не проверить тем же способом, что agent_container_uid (docker run --entrypoint id
+# здесь падает: "id": executable file not found). Взято из фактического
+# `docker inspect` реально запущенного контейнера на живом VDS-A ("User": "65532") —
+# тот же класс гочи, что и с agent_xray_config_host_dir: bind-mount не
+# транслирует UID/GID, конфиг-файл на хосте должен быть заранее chown'нут на этот
+# UID, иначе непривилегированный процесс внутри контейнера не сможет его прочитать
+# (поймано этой же сессией: control-gateway падал в restart loop с "permission
+# denied" на /etc/xray/config.json, пока владелец файла был root:root).
+platform_control_gateway_container_uid: 65532
+platform_control_gateway_container_gid: 65532
+
+# REALITY-идентичность самого gateway (приватный ключ — секрет, живёт ТОЛЬКО в Ansible
+# Vault, никогда не должен попадать в этот файл со значением). Публичный ключ и
+# shortId — те же значения, что нужно будет передать entry-нодам как
+# agent_control_plane_tunnel_public_key/agent_control_plane_tunnel_short_id
+# (roles/agent_install/defaults/main.yml). Сгенерированы один раз через тот же
+# security/reality_keys.py, что уже используют per-cascade REALITY-ключи Platform —
+# см. group_vars/all/vault.yml.example за инструкцией, как сгенерировать свою пару.
+platform_control_gateway_private_key: "{{ vault_control_gateway_reality_private_key | default('') }}"
+platform_control_gateway_short_id: "{{ vault_control_gateway_reality_short_id | default('') }}"
+
+# VLESS-идентичность клиента (entry-нод), которой control-gateway разрешает
+# рукопожатие. ЧЕСТНАЯ ОГОВОРКА: один общий UUID на ВСЕ entry-ноды с включённым
+# туннелем, а не отдельный per-node — упрощение этого среза, не забытая деталь.
+# Не ослабляет реальную аутентификацию ноды: этот UUID даёт только доступ к
+# самому REALITY-транспорту (может ли клиент вообще открыть туннель до
+# 127.0.0.1:50051/50052), а КТО это за нода — по-прежнему решает mTLS-сертификат/
+# enrollment-токен ВНУТРИ туннеля (security/mtls_ca.py), который этот срез не
+# трогает. Следствие упрощения: отозвать доступ к туннелю можно только для всех
+# entry-нод сразу (перегенерировать UUID и перекатить обе роли), не для одной.
+# Если понадобится точечный отзыв — вынести в host_vars per-node (см.
+# provisioning/README.md за тем, почему это не сделано сразу в этом срезе).
+platform_control_gateway_client_uuid: "{{ vault_control_gateway_client_uuid | default('') }}"
+
+# Донор-камуфляж (REALITY "dest"/serverNames) — сайт, чей настоящий TLS-хендшейк
+# REALITY одалживает. Тот же пул принципов, что REALITY_DONOR_POOL в
+# platform/src/dist_vpn_platform/services/xray_templates.py (реальный TLS 1.3 сайт,
+# не хардкодить один и тот же домен на весь флот навсегда), но это ОТДЕЛЬНЫЙ канал
+# от пользовательских каскадов, так что намеренно не переиспользует ту же
+# Python-функцию выбора (control-gateway один на всю Platform-ноду, а не per-cascade) —
+# оператор может сменить донора вручную, если понадобится.
+platform_control_gateway_donor: "img.yandex.ru"
+
+# --- Caddy: loopback-only, когда control-gateway забрал публичный 443 ---
+# platform_control_gateway_enabled: true означает, что снаружи Caddy больше не
+# достать напрямую — доступ к Admin Client/REST API только через SSH-port-forward
+# оператора (ssh -L <port>:127.0.0.1:{{ platform_caddy_bind_port }} <host>, см.
+# provisioning/README.md). Осознанный компромисс: без домена ACME (порт 80) всё
+# равно не используется (tls internal, самоподписанный), так что публичная
+# экспозиция Caddy давала только доступ к самой админке — а она и так
+# чувствительный компонент (полный контроль над флотом), закрытие её от публичного
+# интернета — это ужесточение само по себе, не только следствие занятого порта 443.
+platform_caddy_bind_port: 8443

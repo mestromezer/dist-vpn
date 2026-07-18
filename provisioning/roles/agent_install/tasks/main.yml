@@ -16,5 +16,8 @@
 - name: Разложить mTLS-материал и запустить контейнер Agent'а
   ansible.builtin.import_tasks: run.yml
 
+- name: Настроить control-plane REALITY sidecar (только entry-ноды в РФ, см. defaults/main.yml)
+  ansible.builtin.import_tasks: control_plane_tunnel.yml
+
 - name: Проверить, что контейнер Agent'а поднялся
   ansible.builtin.import_tasks: verify.yml

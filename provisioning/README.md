@@ -523,6 +523,130 @@ plumbing"), и потому что точный путь, который Agent �
 volume под путь персиста Agent'а, как только код Agent'а из этого раунда
 будет смержен и станет видно, что именно и куда он пишет.
 
+## Control-plane через REALITY, зачем
+
+Найдено при реальном деплое, не спроектировано заранее: entry-нода в РФ
+(VDS-RU) не могла удержать соединение с control-plane Platform (50051/50052)
+несмотря на то, что и mTLS, и firewall-правила были корректны. Диагностика —
+`tcpdump` на Platform-ноде во время реального `curl`/`openssl s_client` с
+российской entry-ноды — показала: TCP-хендшейк (SYN/SYN-ACK/ACK) проходит
+идеально каждый раз, но ни один байт TLS ClientHello ни разу не долетел до
+Platform ни на одной попытке (443 и 50052 дважды). Это классическая сигнатура
+активного DPI (ТСПУ): хендшейк пропускают, режут именно первый пакет с
+данными, где виден SNI/сертификат — self-signed сертификат control-plane
+канала к тому же сам по себе похож на паттерн, по которому такое фильтруют.
+
+Обычный домен + Let's Encrypt здесь ненадёжен: по состоянию на середину 2026
+ТСПУ частично перешёл на поведенческий fingerprinting, а не только проверку
+SNI/сертификата, так что "просто настоящий сертификат" не гарантирует
+проход. Вместо этого control-plane трафик entry-нод в РФ заворачивается в тот
+же VLESS+REALITY, что уже доказанно работает для пользовательского
+data-plane (`platform/src/dist_vpn_platform/services/xray_templates.py`,
+`security/reality_keys.py`) — REALITY делает настоящий TLS-хендшейк с
+настоящим сторонним сайтом (донор из `platform_control_gateway_donor`/
+`agent_control_plane_tunnel_donor`, по умолчанию `img.yandex.ru`), так что
+для DPI это неотличимо от обычного HTTPS к этому сайту.
+
+**Голого REALITY оказалось недостаточно.** Даже с настоящим хендшейком к
+реальному донору TCP-хендшейк проходил, но ClientHello всё равно не доходил
+до Platform — тот же симптом, что и без REALITY вообще. Решение нашлось
+только с фрагментацией: `freedom`-outbound с `settings.fragment` (`packets:
+"tlshello"`, `length: "2-10"`, `interval: "10-20"`), подключённый к основному
+VLESS+REALITY outbound'у через `streamSettings.sockopt.dialerProxy` —
+официальный, задокументированный Xray-паттерн именно для этого случая
+(<https://xtls.github.io/en/config/outbounds/freedom.html>,
+<https://xtls.github.io/en/config/transports/sockopt.html>). Раздробленный на
+мелкие TCP-фрагменты ClientHello доходит и разбирается control-gateway'ем без
+ошибок — подтверждено `tcpdump`-захватом на живом VDS-A (фрагменты видны как
+несколько мелких PSH-пакетов вместо одного) и логами Xray
+(`dialing to tcp:127.0.0.1:50051` → `connection opened`, т.е. реально
+доходит до gRPC-порта Platform).
+
+### Архитектура
+
+- **Platform-нода** (`roles/platform_install/tasks/control_gateway.yml`):
+  статический (не управляемый через gRPC AddInbound — он и есть тот канал,
+  который защищает) Xray-инстанс, REALITY-inbound на публичном 443. Routing
+  ограничивает авторизованного клиента ТОЛЬКО адресами
+  `127.0.0.1:50051`/`127.0.0.1:50052` (свои же gRPC-порты Platform) — не
+  открытый прокси наружу.
+- **Entry-нода** (`roles/agent_install/tasks/control_plane_tunnel.yml`):
+  сайдкар-контейнер с двумя `dokodemo-door` inbound'ами на loopback
+  (15051/15052) + один VLESS+REALITY outbound (с `fragment`-цепочкой через
+  `dialerProxy`) до control-gateway'я.
+  `network_mode: "container:{{ agent_container_name }}"` — сайдкар делит
+  сетевой неймспейс с самим Agent'ом (не файловую систему), так что
+  `127.0.0.1:15051` реально видим из Agent'а как его собственный loopback.
+  `AGENT_PLATFORM_ADDRESS` автоматически переопределяется на
+  `127.0.0.1:15051` в `tasks/run.yml`, когда туннель включён — Agent-код
+  не менялся вообще, используется уже существующая конвенция
+  `resolved_platform_enrollment_address` (port+1 для enrollment-порта).
+
+Официальная документация полей: <https://xtls.github.io/en/config/transports/reality.html>
+(REALITY) и <https://xtls.github.io/en/config/inbounds/dokodemo.html> (dokodemo-door).
+
+### Ещё одна найденная гоча: non-root образ Xray-core на привилегированном порту
+
+Официальный образ `ghcr.io/xtls/xray-core` — distroless, работает под UID 65532
+(не root, без shell). Два независимых следствия, оба закрыты в
+`control_gateway.yml`/`control_plane_tunnel.yml`:
+1. Конфиг-файл на хосте должен быть `chown`'нут на этот UID (bind-mount не
+   транслирует владельца между хостом и контейнером) — иначе
+   `open /etc/xray/config.json: permission denied` в цикле рестартов.
+2. Bind на порт 443 (control-gateway) падает `permission denied` под non-root
+   UID даже с `network_mode: host`. Точечная `docker_container: capabilities:
+   [NET_BIND_SERVICE]` не сработала сама по себе на живом тесте (не выяснено
+   до конца, почему) — рабочий фикс — `ansible.posix.sysctl`:
+   `net.ipv4.ip_unprivileged_port_start` (персистентно, через
+   `/etc/sysctl.d/`), стандартный приём для non-root Xray/nginx на 443.
+
+### Включение
+
+Оба флага — явный opt-in (`false` по умолчанию), тот же принцип, что и
+`agent_insecure_dev_mode`:
+
+```
+platform_control_gateway_enabled: true       # на Platform-ноде
+agent_control_plane_tunnel_enabled: true     # на КОНКРЕТНОЙ entry-ноде в РФ
+```
+
+Ключи — один общий комплект на весь control-gateway (см. честную оговорку в
+`roles/platform_install/defaults/main.yml`, `platform_control_gateway_client_uuid`),
+генерируются один раз тем же кодом, что и REALITY-ключи пользовательских
+каскадов Platform:
+
+```bash
+cd platform && python3 -c "
+import sys; sys.path.insert(0, 'src')
+from dist_vpn_platform.security.reality_keys import generate_reality_keypair, generate_short_id
+priv, pub = generate_reality_keypair()
+print(f'private={priv}\npublic={pub}\nshort_id={generate_short_id()}')"
+python3 -c "import uuid; print(uuid.uuid4())"
+```
+
+Приватный ключ → `vault_control_gateway_reality_private_key` (только Platform),
+публичный ключ/shortId/uuid → те же значения на entry-ноде как
+`vault_control_gateway_reality_public_key`/`vault_control_gateway_reality_short_id`/
+`vault_control_gateway_client_uuid` — см. `group_vars/all/vault.yml.example`.
+
+### Побочный эффект: Caddy уходит на loopback
+
+`platform_control_gateway_enabled: true` забирает у Caddy публичный 443 (REALITY
+должен слушать именно его — нестандартный порт сам по себе сигнал для
+поведенческого DPI). Caddy переключается на
+`127.0.0.1:{{ platform_caddy_bind_port }}` (по умолчанию 8443) — доступ к Admin
+Client/REST API снаружи только через SSH-port-forward оператора:
+
+```bash
+ssh -L 8443:127.0.0.1:8443 <алиас Platform-хоста>
+# затем https://localhost:8443 в браузере, пока сессия открыта
+```
+
+Осознанное дополнительное ужесточение, не только следствие занятого порта:
+без домена ACME (порт 80) и так не используется (`tls internal`), так что
+публичная экспозиция Caddy раньше давала только доступ к самой админке — а
+она и так чувствительный компонент (полный контроль над флотом).
+
 ## Что реально проверено в этой песочнице
 
 Честно, без прикрас — то, что **не** было и не могло быть проверено
