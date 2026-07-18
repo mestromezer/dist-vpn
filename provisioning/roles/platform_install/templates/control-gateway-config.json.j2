@@ -6,21 +6,21 @@
   (realitySettings), https://xtls.github.io/en/config/protocols/vless.html (VLESS) и
   https://xtls.github.io/en/config/outbounds/vless.html (XTLS Vision flow).
 
-  ⚠️ ИЗВЕСТНАЯ НЕРЕШЁННАЯ ПРОБЛЕМА (см. README.md "Control-plane через REALITY,
-  зачем" — раздел "Открытая проблема: устойчивый TLS-in-TLS поток из РФ" за полным
-  разбором): flow: "xtls-rprx-vision" был опробован как фикс, но НЕ включён здесь —
-  пробовался и был откачен в этой же сессии. Xray-core логирует "the pure TLS proxy
-  has certain TLS in TLS characters" без него, и офдокументация Vision прямо
-  говорит, что этот flow "eliminates TLS-in-TLS characteristics" (что теоретически
-  и есть наша ситуация — настоящий mTLS Agent<->Platform поверх VLESS+REALITY) — но
-  на практике Vision конфликтует с dokodemo-door-based архитектурой этого туннеля
-  (сервер стабильно отвечал "client flow is empty" даже при БУКВАЛЬНО идентичном
-  flow на обеих сторонах, с fragment/dialerProxy и без) — подозрение на
-  задокументированное ограничение Xray (dialerProxy не форвардит Vision-специфичные
-  маркеры потока корректно, а dokodemo-door, похоже, не даёt Vision нужный
-  низкоуровневый доступ к сырому сокету). НЕ включать flow здесь, пока это не
-  решено — включение при рассинхроне с клиентом ломает даже то, что сейчас
-  работает.
+  flow: "" (Vision НЕ используется) — намеренно, не временная заглушка. См.
+  README.md "Control-plane через REALITY, зачем" за полным разбором расследования:
+  flow: "xtls-rprx-vision" был опробован как фикс для лога "pure TLS proxy has
+  certain TLS in TLS characters", но КАЖДЫЙ раз, когда сервер отвечал "client flow
+  is empty", причиной оказывался рассинхрон flow между этим файлом и клиентским
+  control-plane-tunnel-config.json.j2 (правился вручную на хосте в ходе отладки).
+  Решающий A/B-тест (VDS-B, без цензуры): байт-в-байт идентичный конфиг с
+  dialerProxy+fragment+Vision на ОБЕИХ синхронных сторонах отработал чисто. Когда
+  на VDS-RU оба файла синхронизировали на flow: "" — enrollment тоже стабильно
+  доходил до gateway (firstLen=276, "accepted... taking detour"). Устойчивый сбой,
+  который остаётся — это ЧИСТО ClientHello-уровня блокировка ТСПУ ("failed to read
+  client hello"), купируется фрагментацией (fragment/dialerProxy ниже) и носит
+  вероятностный/адаптивный характер, а не является следствием flow. Vision не
+  нужен — не включать без крайней необходимости: любой рассинхром с клиентом
+  ломает даже то, что сейчас работает.
 
   Один VLESS+REALITY inbound на порту platform_control_gateway_port (443, тот же
   порт, что раньше держал Caddy — см. Caddyfile.j2 за переносом Caddy на loopback).
