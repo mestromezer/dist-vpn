@@ -3,8 +3,23 @@
   Не редактировать вручную на хосте — правки будут перезаписаны при следующем прогоне.
 
   Официальная документация полей: https://xtls.github.io/en/config/transports/reality.html
-  (realitySettings), https://xtls.github.io/en/config/protocols/vless.html (VLESS) и
-  https://xtls.github.io/en/config/outbounds/vless.html (XTLS Vision flow).
+  (realitySettings), https://xtls.github.io/en/config/protocols/vless.html (VLESS),
+  https://xtls.github.io/en/config/outbounds/vless.html (XTLS Vision flow) и
+  https://xtls.github.io/en/config/transports/xhttp.html (XHTTP).
+
+  ⚠️ [Эксперимент, см. README.md "Control-plane через REALITY"] network: "xhttp"
+  вместо "raw". Синхронно с control-plane-tunnel-config.json.j2 на Agent-стороне —
+  xhttpSettings.path ЗДЕСЬ ДОЛЖЕН совпадать буквально с тем файлом (используется
+  platform_control_gateway_xhttp_path / agent_control_plane_tunnel_xhttp_path,
+  одно и то же значение по умолчанию задано в обоих defaults/main.yml). Причина
+  смены транспорта — см. подробное обоснование в комментарии control-plane-tunnel-
+  config.json.j2 (кратко: байт-точный tcpdump предыдущей сессии показал, что ТСПУ
+  на этом маршруте инспектирует весь поток целиком, а не только ClientHello; один
+  долгий двунаправленный TCP-поток — сам по себе подозрительный паттерн; XHTTP
+  меняет форму трафика на запрос/ответ). fragment/dialerProxy тут никогда не было
+  (клиент — единственная сторона, инициирующая пакеты, значит единственная
+  сторона, где фрагментация ClientHello вообще имела смысл) — с XHTTP это верно
+  тем более: fragment - опция raw-транспорта, к xhttp не применяется.
 
   flow: "" (Vision НЕ используется) — намеренно, не временная заглушка. См.
   README.md "Control-plane через REALITY, зачем" за полным разбором расследования:
@@ -47,7 +62,7 @@
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "raw",
+        "network": "xhttp",
         "security": "reality",
         "realitySettings": {
           "show": false,
@@ -59,6 +74,9 @@
           "shortIds": [
             "{{ platform_control_gateway_short_id }}"
           ]
+        },
+        "xhttpSettings": {
+          "path": "{{ platform_control_gateway_xhttp_path }}"
         }
       },
       "sniffing": {

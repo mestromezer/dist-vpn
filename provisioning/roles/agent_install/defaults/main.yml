@@ -201,6 +201,11 @@ agent_control_plane_tunnel_short_id: "{{ vault_control_gateway_reality_short_id 
 agent_control_plane_tunnel_client_uuid: "{{ vault_control_gateway_client_uuid | default('') }}"
 agent_control_plane_tunnel_donor: "img.yandex.ru"  # ДОЛЖЕН совпадать с platform_control_gateway_donor
 
+# ⚠️ [Эксперимент] ДОЛЖЕН совпадать буквально с platform_control_gateway_xhttp_path
+# (roles/platform_install/defaults/main.yml — см. комментарий там же за полным
+# обоснованием, почему XHTTP вместо raw TCP).
+agent_control_plane_tunnel_xhttp_path: "/api/v1/events"
+
 # Локальные loopback-порты, на которые Agent реально дозванивается (dokodemo-door
 # внутри туннеля превращает "подключение сюда" в "запрос до Platform на другом конце
 # REALITY-канала" — см. tasks/control_plane_tunnel.yml). +1 конвенция между строгим

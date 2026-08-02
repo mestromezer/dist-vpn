@@ -153,6 +153,15 @@ platform_control_gateway_client_uuid: "{{ vault_control_gateway_client_uuid | de
 # оператор может сменить донора вручную, если понадобится.
 platform_control_gateway_donor: "img.yandex.ru"
 
+# ⚠️ [Эксперимент, см. README.md "Control-plane через REALITY"] XHTTP вместо
+# raw TCP — network: "raw" достоверно проходил ClientHello непоследовательно
+# даже с fragment/dialerProxy (см. README, финальные факты предыдущей сессии) —
+# XHTTP меняет саму форму трафика (запрос/ответ вместо одного долгого потока),
+# что независимо рекомендовано и XTLS-документацией, и community-обсуждением
+# именно этого симптома (VLESS TLS handshake blocking в РФ). ДОЛЖЕН совпадать
+# буквально с agent_control_plane_tunnel_xhttp_path на entry-ноде.
+platform_control_gateway_xhttp_path: "/api/v1/events"
+
 # --- Caddy: loopback-only, когда control-gateway забрал публичный 443 ---
 # platform_control_gateway_enabled: true означает, что снаружи Caddy больше не
 # достать напрямую — доступ к Admin Client/REST API только через SSH-port-forward

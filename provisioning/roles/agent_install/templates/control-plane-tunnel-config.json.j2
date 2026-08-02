@@ -4,26 +4,31 @@
 
   Официальная документация полей: https://xtls.github.io/en/config/transports/reality.html
   (realitySettings, клиентская сторона: fingerprint/serverName/publicKey/shortId),
-  https://xtls.github.io/en/config/inbounds/dokodemo.html (dokodemo-door) и
-  https://xtls.github.io/en/config/outbounds/freedom.html (fragment) +
-  https://xtls.github.io/en/config/transports/sockopt.html (dialerProxy).
+  https://xtls.github.io/en/config/inbounds/dokodemo.html (dokodemo-door),
+  https://xtls.github.io/en/config/transports/xhttp.html (XHTTP).
 
-  fragment/dialerProxy — найдено фактическим тестированием этой сессии (см.
-  README.md "Control-plane через REALITY, зачем"): голый VLESS+REALITY (без
-  фрагментации) НЕ проходил ТСПУ — tcpdump на Platform-ноде показывал полный TCP-
-  хендшейк, но ноль байт TLS ClientHello. Раздельный freedom-outbound с
-  settings.fragment, подключенный через streamSettings.sockopt.dialerProxy
-  ПЕРЕД основным REALITY outbound'ом (официальный задокументированный паттерн
-  именно для этого случая), решил проблему — ClientHello, раздробленный на мелкие
-  TCP-фрагменты, доходит и разбирается control-gateway'ем без ошибок.
+  ⚠️ [Эксперимент, см. README.md "Control-plane через REALITY"] network: "xhttp"
+  вместо "raw" + fragment/dialerProxy. Предыдущая сессия эмпирически доказала:
+  raw TCP + fragment/dialerProxy решает ТОЛЬКО фазу ClientHello — байт-точный
+  tcpdump-анализ показал, что ТСПУ на этом сетевом пути реассемблирует и
+  продолжает инспектировать УЖЕ установленный REALITY-поток целиком, не только
+  хендшейк (см. корпус независимых находок про TSPU inline-blocking — ссылка в
+  README). Один постоянный двунаправленный TCP-поток (raw) сам по себе — сигнал,
+  непохожий на HTTPS-браузинг, независимо от качества камуфляжа хендшейка. XHTTP
+  меняет саму ФОРМУ трафика (запрос/ответ вместо одного долгого потока,
+  разделение upload/download) — независимо рекомендовано и XTLS-документацией, и
+  community-обсуждением именно этого симптома (VLESS TLS handshake
+  blocking/degradation в РФ, начало 2026). fragment/dialerProxy сознательно
+  убраны из этой версии — изолируем переменную для чистого теста; если XHTTP
+  сам по себе не решит проблему, следующий шаг — не досадовать fragment обратно
+  вслепую, а вернуться к байт-точному tcpdump-анализу заново, уже под XHTTP.
 
-  flow: "" (Vision НЕ используется) — намеренно, см. подробный разбор в
-  control-gateway-config.json.j2 (тот же комментарий) и README.md "Control-plane
-  через REALITY, зачем". Кратко: "client flow is empty" на сервере оказался
-  рассинхроном flow между этим файлом и gateway'ем, а не несовместимостью
-  Vision/dokodemo-door — при синхронных flow (в т.ч. с dialerProxy+fragment+Vision
-  на обеих сторонах, A/B-тест на VDS-B) всё отрабатывает чисто. Держать flow здесь
-  и на gateway'е ВСЕГДА синхронными.
+  flow: "" (Vision НЕ используется) — намеренно сохранено даже при смене
+  транспорта. См. README.md "Control-plane через REALITY, зачем": предыдущая
+  сессия эмпирически доказала, что "client flow is empty" был рассинхроном flow
+  между этим файлом и gateway'ем, а не технической несовместимостью. Держать flow
+  здесь и на gateway'е ВСЕГДА синхронными — тот же урок применяется к xhttpSettings.path
+  ниже: ДОЛЖЕН совпадать буквально с control-gateway-config.json.j2.
 
   Два dokodemo-door inbound'а на loopback — Agent реально дозванивается сюда
   (AGENT_PLATFORM_ADDRESS=127.0.0.1:{{ agent_control_plane_tunnel_local_strict_port }},
@@ -81,7 +86,7 @@
         ]
       },
       "streamSettings": {
-        "network": "raw",
+        "network": "xhttp",
         "security": "reality",
         "realitySettings": {
           "show": false,
@@ -90,19 +95,9 @@
           "publicKey": "{{ agent_control_plane_tunnel_public_key }}",
           "shortId": "{{ agent_control_plane_tunnel_short_id }}"
         },
-        "sockopt": {
-          "dialerProxy": "fragment-out"
-        }
-      }
-    },
-    {
-      "tag": "fragment-out",
-      "protocol": "freedom",
-      "settings": {
-        "fragment": {
-          "packets": "tlshello",
-          "length": "{{ agent_control_plane_tunnel_fragment_length }}",
-          "interval": "{{ agent_control_plane_tunnel_fragment_interval }}"
+        "xhttpSettings": {
+          "path": "{{ agent_control_plane_tunnel_xhttp_path }}",
+          "host": "{{ agent_control_plane_tunnel_donor }}"
         }
       }
     }
