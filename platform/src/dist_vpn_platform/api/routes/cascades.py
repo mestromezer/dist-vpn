@@ -36,12 +36,15 @@ from dist_vpn_platform.db import get_db
 from dist_vpn_platform.generated import agent_control_pb2 as pb
 from dist_vpn_platform.grpc_server.servicer import new_command_id
 from dist_vpn_platform.models.admin_account import AdminAccount
-from dist_vpn_platform.models.cascade import Cascade, CascadeExitNode, CascadeStatus
+from dist_vpn_platform.models.cascade import Cascade, CascadeExitLink, CascadeExitLinkStatus, CascadeStatus
+from dist_vpn_platform.models.exit_link_allocation import ExitLinkAllocation, ExitLinkAllocationStatus
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.link_test import LinkTest
 from dist_vpn_platform.models.node import Node
+from dist_vpn_platform.models.remote_exit_candidate import RemoteExitCandidate, RemoteExitCandidateStatus
 from dist_vpn_platform.models.user import User, UserCascade
 from dist_vpn_platform.schemas.cascades import (
+    CascadeExitLinkOut,
     CascadeInput,
     CascadeListResponse,
     CascadeMigrateUsersRequest,
@@ -63,6 +66,43 @@ router = APIRouter(prefix="/cascades", tags=["cascades"])
 _NOT_IMPLEMENTED = "Not implemented in this slice (TZ-5 §4.2/§4.3 - follow-up slice)."
 
 
+async def _get_or_create_local_remote_exit_candidate(db: AsyncSession, exit_node: Node) -> RemoteExitCandidate:
+    """Local/degenerate path (Platform not actually split into RU-segment/foreign-
+    segment instances yet, or this exit node happens to be co-located in the same DB
+    as the entry side) - see models/remote_exit_candidate.py's docstring for the
+    peer_platform_id=NULL convention this relies on. A real-peer branch (call
+    services/peering_client.py::provision_exit_link instead of creating this row
+    directly) is not wired up yet - no request shape this route accepts today can
+    reach it, since CascadeInput.exit_node_ids are always local Node ids for now."""
+    stmt = select(RemoteExitCandidate).where(
+        RemoteExitCandidate.peer_platform_id.is_(None),
+        RemoteExitCandidate.remote_node_id == exit_node.id,
+    )
+    candidate = (await db.execute(stmt)).scalar_one_or_none()
+    if candidate is None:
+        candidate = RemoteExitCandidate(
+            peer_platform_id=None,
+            remote_node_id=exit_node.id,
+            label=exit_node.label,
+            endpoint_address=exit_node.public_address or exit_node.hostname,
+            status=RemoteExitCandidateStatus.HEALTHY
+            if exit_node.status.value == "healthy"
+            else RemoteExitCandidateStatus.UNKNOWN,
+        )
+        db.add(candidate)
+        await db.flush()
+    return candidate
+
+
+def _cascade_exit_link_out(link: CascadeExitLink) -> CascadeExitLinkOut:
+    return CascadeExitLinkOut(
+        remote_exit_candidate_id=link.remote_exit_candidate_id,
+        remote_node_id=link.remote_exit_candidate.remote_node_id,
+        status=link.status,
+        active_preset=link.active_preset,
+    )
+
+
 @router.get("", response_model=CascadeListResponse)
 async def list_cascades(
     page: int = Query(default=1, ge=1),
@@ -74,7 +114,7 @@ async def list_cascades(
 
     stmt = (
         select(Cascade)
-        .options(selectinload(Cascade.exit_links))
+        .options(selectinload(Cascade.exit_links).selectinload(CascadeExitLink.remote_exit_candidate))
         .order_by(Cascade.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -87,6 +127,7 @@ async def list_cascades(
                 id=c.id,
                 entry_node_id=c.entry_node_id,
                 exit_node_ids=c.exit_node_ids,
+                exit_links=[_cascade_exit_link_out(link) for link in c.exit_links],
                 status=c.status,
                 hop_a_presets=c.hop_a_presets,
                 hopa_reality_public_key=c.hopa_reality_public_key,
@@ -127,18 +168,43 @@ async def create_cascade(
     db.add(cascade)
     await db.flush()  # assign cascade.id before it's referenced below
 
-    exit_links: dict[str, CascadeExitNode] = {}
+    # hopb_reality_private_key now lives on ExitLinkAllocation (the side that will
+    # actually dispatch the matching AddInbound to its own exit-node Agent), not on
+    # CascadeExitLink - see models/exit_link_allocation.py's docstring. In this
+    # local/degenerate path (no real peer Platform yet) that's still this same
+    # request/process, so both rows are created together here.
+    exit_links: dict[str, CascadeExitLink] = {}
+    exit_allocations: dict[str, ExitLinkAllocation] = {}
     for exit_node in exit_nodes:
+        candidate = await _get_or_create_local_remote_exit_candidate(db, exit_node)
+
         hopb_private_key, hopb_public_key = reality_keys.generate_reality_keypair()
-        link = CascadeExitNode(
-            cascade_id=cascade.id,
+        hopb_short_id = reality_keys.generate_short_id()
+
+        allocation = ExitLinkAllocation(
+            peer_platform_id=None,
             exit_node_id=exit_node.id,
+            remote_cascade_id=cascade.id,
             hopb_reality_private_key=hopb_private_key,
             hopb_reality_public_key=hopb_public_key,
-            hopb_reality_short_id=reality_keys.generate_short_id(),
+            hopb_reality_short_id=hopb_short_id,
+            status=ExitLinkAllocationStatus.PENDING,
+        )
+        db.add(allocation)
+        await db.flush()  # assign allocation.id before it's referenced as remote_link_id below
+
+        link = CascadeExitLink(
+            cascade_id=cascade.id,
+            remote_exit_candidate_id=candidate.id,
+            remote_link_id=allocation.id,
+            status=CascadeExitLinkStatus.PENDING,
+            hopb_reality_public_key=hopb_public_key,
+            hopb_reality_short_id=hopb_short_id,
         )
         db.add(link)
+        link.remote_exit_candidate = candidate  # avoid a re-SELECT for _cascade_exit_link_out below
         exit_links[exit_node.id] = link
+        exit_allocations[exit_node.id] = allocation
     await db.flush()
 
     non_p4_presets = [p for p in body.hop_a_presets if p != "p4"]
@@ -176,6 +242,7 @@ async def create_cascade(
     exit_ok_count = 0
     for exit_node in exit_nodes:
         link = exit_links[exit_node.id]
+        allocation = exit_allocations[exit_node.id]
         outbound_ok = await dispatch_best_effort(
             entry_node.id,
             pb.Command(
@@ -194,18 +261,24 @@ async def create_cascade(
         )
         entry_ok = entry_ok and outbound_ok
 
+        # Private key: allocation.hopb_reality_private_key, not link.* - see
+        # models/exit_link_allocation.py's docstring (this Platform is the one
+        # dispatching the matching AddInbound, so it's also the one that generated
+        # and holds the private half; CascadeExitLink only ever gets the public half).
         inbound_ok = await dispatch_best_effort(
             exit_node.id,
             pb.Command(
                 command_id=new_command_id(),
                 add_inbound=pb.AddInbound(
                     inbound_json=xray.build_hopb_inbound_json(
-                        cascade.id, exit_node.id, link.hopb_reality_private_key, link.hopb_reality_short_id
+                        cascade.id, exit_node.id, allocation.hopb_reality_private_key, allocation.hopb_reality_short_id
                     )
                 ),
             ),
             context=f"cascade {cascade.id} hopb inbound on {exit_node.id}",
         )
+        link.status = CascadeExitLinkStatus.UP if inbound_ok else CascadeExitLinkStatus.DOWN
+        allocation.status = ExitLinkAllocationStatus.UP if inbound_ok else ExitLinkAllocationStatus.DOWN
         if inbound_ok:
             exit_ok_count += 1
 
@@ -243,6 +316,7 @@ async def create_cascade(
         id=cascade.id,
         entry_node_id=cascade.entry_node_id,
         exit_node_ids=[n.id for n in exit_nodes],
+        exit_links=[_cascade_exit_link_out(exit_links[n.id]) for n in exit_nodes],
         status=cascade.status,
         hop_a_presets=cascade.hop_a_presets,
         hopa_reality_public_key=cascade.hopa_reality_public_key,
@@ -268,7 +342,11 @@ async def get_cascade(
     db: AsyncSession = Depends(get_db),
     _admin: AdminAccount = Depends(require_admin),
 ) -> CascadeOut:
-    stmt = select(Cascade).options(selectinload(Cascade.exit_links)).where(Cascade.id == cascade_id)
+    stmt = (
+        select(Cascade)
+        .options(selectinload(Cascade.exit_links).selectinload(CascadeExitLink.remote_exit_candidate))
+        .where(Cascade.id == cascade_id)
+    )
     cascade = (await db.execute(stmt)).scalar_one_or_none()
     if cascade is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Cascade not found")
@@ -277,6 +355,7 @@ async def get_cascade(
         id=cascade.id,
         entry_node_id=cascade.entry_node_id,
         exit_node_ids=cascade.exit_node_ids,
+        exit_links=[_cascade_exit_link_out(link) for link in cascade.exit_links],
         status=cascade.status,
         hop_a_presets=cascade.hop_a_presets,
         hopa_reality_public_key=cascade.hopa_reality_public_key,
@@ -300,7 +379,11 @@ async def delete_cascade(
     db: AsyncSession = Depends(get_db),
     admin: AdminAccount = Depends(require_admin),
 ) -> None:
-    stmt = select(Cascade).options(selectinload(Cascade.exit_links)).where(Cascade.id == cascade_id)
+    stmt = (
+        select(Cascade)
+        .options(selectinload(Cascade.exit_links).selectinload(CascadeExitLink.remote_exit_candidate))
+        .where(Cascade.id == cascade_id)
+    )
     cascade = (await db.execute(stmt)).scalar_one_or_none()
     if cascade is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Cascade not found")
@@ -343,11 +426,25 @@ async def delete_cascade(
     # UserCascade has no ORM relationship on the Cascade side (only User ->
     # UserCascade, see models/user.py), so it needs an explicit cleanup - same
     # "don't rely on DB-level ON DELETE CASCADE, SQLite in tests doesn't enforce FKs
-    # by default" pattern as api/routes/nodes.py's decommission_node(). CascadeExitNode
+    # by default" pattern as api/routes/nodes.py's decommission_node(). CascadeExitLink
     # rows, by contrast, DO have `cascade="all, delete-orphan"` on Cascade.exit_links
     # (models/cascade.py) and are already loaded via selectinload above, so db.delete()
     # handles them - an extra raw DELETE here would just race the ORM's own cascade
     # delete for the same rows.
+    #
+    # ExitLinkAllocation has no ORM relationship to Cascade at all (it's keyed by the
+    # opaque remote_cascade_id, not a real FK - see models/exit_link_allocation.py's
+    # docstring), so it needs the same explicit cleanup UserCascade does. Only the
+    # local/degenerate rows this Platform created for this cascade are ever deletable
+    # here (peer_platform_id IS NULL) - a real peer's own ExitLinkAllocation rows live
+    # in that peer's database and are its own responsibility to clean up (slice 10+
+    # will add a ReleaseExitLink peering call for that case).
+    await db.execute(
+        delete(ExitLinkAllocation).where(
+            ExitLinkAllocation.peer_platform_id.is_(None),
+            ExitLinkAllocation.remote_cascade_id == cascade_id,
+        )
+    )
     await db.execute(delete(UserCascade).where(UserCascade.cascade_id == cascade_id))
     await db.delete(cascade)
     await db.commit()

@@ -17,11 +17,13 @@ from dist_vpn_platform.api.deps import require_admin
 from dist_vpn_platform.config import settings
 from dist_vpn_platform.db import get_db
 from dist_vpn_platform.models.admin_account import AdminAccount
-from dist_vpn_platform.models.cascade import CascadeExitNode
+from dist_vpn_platform.models.cascade import CascadeExitLink
 from dist_vpn_platform.models.enrollment_token import EnrollmentToken
+from dist_vpn_platform.models.exit_link_allocation import ExitLinkAllocation
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
 from dist_vpn_platform.models.node_resource_sample import NodeResourceSample
+from dist_vpn_platform.models.remote_exit_candidate import RemoteExitCandidate
 from dist_vpn_platform.schemas.nodes import (
     NodeEnrollRequest,
     NodeEnrollResponse,
@@ -151,7 +153,24 @@ async def decommission_node(
     # and the actual Agent-side RemoveOutbound/RemoveInbound command dispatch are
     # TODO for the cascade-assembly follow-up slice (see platform/README.md) - this
     # slice only guarantees the Platform-side registry no longer references the node.
-    await db.execute(delete(CascadeExitNode).where(CascadeExitNode.exit_node_id == node_id))
+    #
+    # Goes through RemoteExitCandidate now, not a direct exit_node_id FK - see
+    # models/remote_exit_candidate.py. Only local/degenerate candidates
+    # (peer_platform_id IS NULL) can ever correspond to a Node row this same database
+    # can decommission; a real peer's own candidate rows are its own concern.
+    local_candidate_ids = select(RemoteExitCandidate.id).where(
+        RemoteExitCandidate.peer_platform_id.is_(None),
+        RemoteExitCandidate.remote_node_id == node_id,
+    )
+    await db.execute(
+        delete(CascadeExitLink).where(CascadeExitLink.remote_exit_candidate_id.in_(local_candidate_ids))
+    )
+    await db.execute(delete(ExitLinkAllocation).where(ExitLinkAllocation.exit_node_id == node_id))
+    await db.execute(
+        delete(RemoteExitCandidate).where(
+            RemoteExitCandidate.peer_platform_id.is_(None), RemoteExitCandidate.remote_node_id == node_id
+        )
+    )
 
     health_event = HealthEvent(
         node_id=node_id,

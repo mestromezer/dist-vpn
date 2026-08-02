@@ -13,6 +13,7 @@ from sqlalchemy import JSON, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from dist_vpn_platform.models.base import Base, new_uuid, sa_enum, utcnow
+from dist_vpn_platform.models.remote_exit_candidate import RemoteExitCandidate
 
 
 class CascadeStatus(str, enum.Enum):
@@ -46,34 +47,76 @@ class Cascade(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    exit_links: Mapped[list["CascadeExitNode"]] = relationship(
+    exit_links: Mapped[list["CascadeExitLink"]] = relationship(
         back_populates="cascade", cascade="all, delete-orphan"
     )
 
     @property
     def exit_node_ids(self) -> list[str]:
-        return [link.exit_node_id for link in self.exit_links]
+        """Backward-compatible view for callers that only need "which node" (e.g. the
+        REST CascadeOut.exit_node_ids field, api/routes/nodes.py::decommission_node).
+        Resolves through the link's RemoteExitCandidate - see that model's docstring
+        for the local-vs-real-peer remote_node_id distinction. Callers that also need
+        per-link status/preset should use `exit_links` directly instead (see
+        schemas/cascades.py CascadeExitLinkOut)."""
+        return [link.remote_exit_candidate.remote_node_id for link in self.exit_links]
 
 
-class CascadeExitNode(Base):
-    """Association: which exit nodes are candidates for a given cascade (the "Hop B
-    candidate pool" from TZ-5 §4.2 - Xray balancer selects among these natively)."""
+class CascadeExitLinkStatus(str, enum.Enum):
+    PENDING = "pending"
+    UP = "up"
+    DEGRADED = "degraded"
+    DOWN = "down"
 
-    __tablename__ = "cascade_exit_nodes"
+
+class CascadeExitLink(Base):
+    """Association: which exit nodes (via their RemoteExitCandidate row - see that
+    model's docstring for why this is not a direct FK to `nodes` anymore) are
+    candidates for a given cascade (the "Hop B candidate pool" from TZ-5 §4.2 - Xray's
+    own balancer selects among the currently-UP ones natively, see
+    services/xray_templates.py build_balancer_routing_rule_json).
+
+    Renamed from CascadeExitNode (table was cascade_exit_nodes) when Platform split
+    into RU-segment/foreign-segment instances made "exit_node_id: FK to nodes.id"
+    structurally impossible to keep - the exit node's row lives in a different
+    Platform's database once the two are genuinely split. No production data existed
+    to preserve at rename time (see platform/README.md - only a handful of dogfood
+    VDS, no real user base), so this is a clean rename rather than an additive one.
+    """
+
+    __tablename__ = "cascade_exit_links"
 
     cascade_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("cascades.id", ondelete="CASCADE"), primary_key=True
     )
-    exit_node_id: Mapped[str] = mapped_column(String(36), ForeignKey("nodes.id"), primary_key=True)
+    remote_exit_candidate_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("remote_exit_candidates.id"), primary_key=True
+    )
 
-    # Hop B (entry->exit backhaul) REALITY identity for this specific (cascade,
-    # exit_node) pairing - generated once when the pairing is created. Belongs here
-    # rather than on Cascade/Node because build_hopb_inbound_json/build_hopb_outbound_json
-    # are already dispatched once per pairing (api/routes/cascades.py's exit-node loop),
-    # and a single physical exit node can be a candidate in more than one cascade with
-    # independent keys per pairing - simpler than reasoning about cross-cascade reuse.
-    hopb_reality_private_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The *peer's* ExitLinkAllocation.id for this same logical link, once a real peer
+    # is involved (services/peering_client.py::provision_exit_link's response) - NULL
+    # in the local/degenerate case (see RemoteExitCandidate's docstring) and while a
+    # remote link hasn't been provisioned yet (services/link_negotiation.py, slice 12).
+    remote_link_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    # Which Hop B preset is currently applied to THIS specific link - unlike
+    # Cascade.hop_a_presets (Hop A, chosen once at creation, no runtime-switch path
+    # yet), Hop B genuinely needs runtime switching for the preset-iteration retry
+    # loop (services/link_negotiation.py, slice 12) since different exit candidates
+    # can be mid-negotiation on different presets at the same time.
+    active_preset: Mapped[str] = mapped_column(String(16), nullable=False, default="p1")
+    status: Mapped[CascadeExitLinkStatus] = mapped_column(
+        sa_enum(CascadeExitLinkStatus), nullable=False, default=CascadeExitLinkStatus.PENDING
+    )
+
+    # Hop B (entry->exit backhaul) REALITY identity for this specific link - PUBLIC
+    # material only. The private key now lives on the exit side's own
+    # ExitLinkAllocation.hopb_reality_private_key (generated by whichever Platform
+    # will actually dispatch the matching AddInbound to its own exit-node Agent) -
+    # RU-Platform never needs to see it, an incidental security improvement from the
+    # split, not just a schema mechanic (see models/exit_link_allocation.py).
     hopb_reality_public_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     hopb_reality_short_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     cascade: Mapped["Cascade"] = relationship(back_populates="exit_links")
+    remote_exit_candidate: Mapped["RemoteExitCandidate"] = relationship()

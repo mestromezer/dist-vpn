@@ -7,12 +7,15 @@ TZ-5 §6.3) rather than new product concepts - see platform/README.md "Deviation
 """
 from dist_vpn_platform.models.admin_account import AdminAccount
 from dist_vpn_platform.models.base import Base
-from dist_vpn_platform.models.cascade import Cascade, CascadeExitNode
+from dist_vpn_platform.models.cascade import Cascade, CascadeExitLink
 from dist_vpn_platform.models.enrollment_token import EnrollmentToken
+from dist_vpn_platform.models.exit_link_allocation import ExitLinkAllocation
 from dist_vpn_platform.models.health_event import HealthEvent
 from dist_vpn_platform.models.link_test import LinkTest
 from dist_vpn_platform.models.node import Node
+from dist_vpn_platform.models.peer_platform import PeerPlatform
 from dist_vpn_platform.models.refresh_token import RefreshToken
+from dist_vpn_platform.models.remote_exit_candidate import RemoteExitCandidate
 from dist_vpn_platform.models.rotation_record import RotationRecord
 from dist_vpn_platform.models.node_resource_sample import NodeResourceSample
 from dist_vpn_platform.models.usage_stat import UsageStat
@@ -23,7 +26,10 @@ __all__ = [
     "Base",
     "Node",
     "Cascade",
-    "CascadeExitNode",
+    "CascadeExitLink",
+    "PeerPlatform",
+    "RemoteExitCandidate",
+    "ExitLinkAllocation",
     "User",
     "UserCascade",
     "UsageStat",

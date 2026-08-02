@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from dist_vpn_platform.models.cascade import CascadeStatus
+from dist_vpn_platform.models.cascade import CascadeExitLinkStatus, CascadeStatus
 
 
 class CascadeInput(BaseModel):
@@ -12,12 +12,29 @@ class CascadeInput(BaseModel):
     hop_a_presets: list[str] = []
 
 
+class CascadeExitLinkOut(BaseModel):
+    """Per-link view (models/cascade.py CascadeExitLink) - additive alongside the
+    older, coarser `CascadeOut.exit_node_ids` (contracts/rest/openapi.yaml's original
+    v1 shape, kept as-is rather than broken - see this codebase's own "additive schema
+    evolution" convention, e.g. CascadeListResponse.total). exit_node_ids alone cannot
+    show per-link status/preset, which matters once a link can be mid-negotiation
+    (services/link_negotiation.py, slice 12) while others on the same cascade are UP."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    remote_exit_candidate_id: str
+    remote_node_id: str
+    status: CascadeExitLinkStatus
+    active_preset: str
+
+
 class CascadeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     entry_node_id: str
     exit_node_ids: list[str]
+    exit_links: list[CascadeExitLinkOut] = []
     status: CascadeStatus
     hop_a_presets: list[str]
     # Public REALITY identity for this cascade's Hop A (client-facing) inbound - never

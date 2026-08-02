@@ -8,10 +8,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from dist_vpn_platform.db import session_scope
-from dist_vpn_platform.models.cascade import CascadeExitNode
+from dist_vpn_platform.models.cascade import CascadeExitLink
+from dist_vpn_platform.models.exit_link_allocation import ExitLinkAllocation
 from dist_vpn_platform.models.node import Node, NodeRole, NodeStatus
+from dist_vpn_platform.models.remote_exit_candidate import RemoteExitCandidate
 from tests.grpc_test_helpers import FakeAgent
 
 
@@ -131,14 +134,33 @@ async def test_create_cascade_dispatches_commands_and_reports_up(
         assert hopa_reality["dest"] == f"{hopa_reality['serverNames'][0]}:443"
         assert hopb_outbound_reality["serverName"] == hopb_inbound_reality["serverNames"][0]
         # The Hop A->B outbound (entry, REALITY client role) must reference the exit
-        # node's own Hop B inbound public identity - fetch the persisted pairing row
+        # node's own Hop B inbound public identity - fetch the persisted pairing row(s)
         # directly since GET /cascades doesn't expose Hop B key material via the API
         # (only Hop A's, which the end client actually needs - see schemas/cascades.py).
+        # Public half lives on CascadeExitLink, private half on ExitLinkAllocation -
+        # see models/exit_link_allocation.py's docstring for why they're split now.
         async with session_scope() as db:
-            link = await db.get(CascadeExitNode, (cascade_id, exit_node_id))
+            candidate = (
+                await db.execute(
+                    select(RemoteExitCandidate).where(
+                        RemoteExitCandidate.peer_platform_id.is_(None),
+                        RemoteExitCandidate.remote_node_id == exit_node_id,
+                    )
+                )
+            ).scalar_one()
+            link = await db.get(CascadeExitLink, (cascade_id, candidate.id))
+            allocation = (
+                await db.execute(
+                    select(ExitLinkAllocation).where(
+                        ExitLinkAllocation.peer_platform_id.is_(None),
+                        ExitLinkAllocation.remote_cascade_id == cascade_id,
+                        ExitLinkAllocation.exit_node_id == exit_node_id,
+                    )
+                )
+            ).scalar_one()
             assert hopb_outbound_reality["publicKey"] == link.hopb_reality_public_key
             assert hopb_outbound_reality["shortId"] == link.hopb_reality_short_id
-            assert hopb_inbound_reality["privateKey"] == link.hopb_reality_private_key
+            assert hopb_inbound_reality["privateKey"] == allocation.hopb_reality_private_key
 
         list_response = await client.get("/cascades", headers=_auth_headers(token))
         assert list_response.json()["total"] == 1
