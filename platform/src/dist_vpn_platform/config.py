@@ -84,6 +84,23 @@ class Settings(BaseSettings):
     # timeout window, not a shorter timeout itself).
     health_scheduler_interval_seconds: int = 10
 
+    # --- Platform<->Platform peering (slice 9+, see platform/README.md "Девятый
+    # слайс" / contracts/proto/platform_peering.proto's header comment) ---
+    # None = single-Platform mode (default, unchanged behavior from before the
+    # RU/foreign split - matches every existing deployment/test until provisioning
+    # actually sets this, see provisioning/roles/platform_install). "entry" starts
+    # services/link_negotiation.py (not yet built - slice 12) and dials peers as a
+    # PlatformPeering client; "exit" starts grpc_server/peering_server.py and never
+    # dials anyone (see contracts/proto/platform_peering.proto for why the dial
+    # direction is fixed this way, not configurable).
+    platform_segment: str | None = None
+    # Separate port from grpc_port (Agent-facing, 50051) and grpc_enrollment_port
+    # (50052) - a different mTLS/pinning trust anchor per listening socket is the
+    # simplest correct option with grpc's ssl_server_credentials (no per-connection
+    # SNI-based cert selection needed for exactly one possible peer). Only bound when
+    # platform_segment == "exit" (grpc_server/peering_server.py).
+    peering_grpc_port: int = 50053
+
     # --- mTLS CA (TZ-5 §6.2 - see security/mtls_ca.py for the full design note) ---
     # Persistent volume for the CA keypair/cert + server leaf keypair/cert. Local/non-
     # Docker dev: relative to the working directory. docker-compose.yml overrides this

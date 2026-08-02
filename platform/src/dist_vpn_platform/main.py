@@ -36,10 +36,23 @@ async def _run() -> None:
             "http_port": settings.http_port,
             "grpc_port": settings.grpc_port,
             "grpc_enrollment_port": settings.grpc_enrollment_port,
+            "platform_segment": settings.platform_segment,
             "env": settings.env,
         },
     )
-    await asyncio.gather(uvicorn_server.serve(), serve_grpc())
+
+    tasks = [uvicorn_server.serve(), serve_grpc()]
+    # Only the exit-segment side ever listens for peering - RU-Platform is always the
+    # dialing side instead (services/peering_client.py, called from
+    # services/link_negotiation.py, slice 12) and needs no listener of its own. See
+    # contracts/proto/platform_peering.proto's header comment for why the dial
+    # direction is fixed rather than symmetric.
+    if settings.platform_segment == "exit":
+        from dist_vpn_platform.grpc_server.peering_server import serve as serve_peering
+
+        tasks.append(serve_peering())
+
+    await asyncio.gather(*tasks)
 
 
 def main() -> None:

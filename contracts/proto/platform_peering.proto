@@ -1,0 +1,121 @@
+// Контракт Platform <-> Platform (peering), НЕ Agent <-> Platform (см. agent_control.proto
+// для того контракта - разные протоколы намеренно, не общий service/package, см.
+// platform/README.md "Девятый слайс" за полным архитектурным обоснованием раскола).
+//
+// Контекст: Platform раскалывается на два независимых инстанса - RU-сегмент (управляет
+// только entry-нодами, физически в РФ) и зарубежный сегмент (управляет только
+// exit-нодами) - потому что прямой Agent->Platform control-plane канал из РФ до Platform
+// за рубежом убивается ТСПУ уже после TLS-хендшейка (см. provisioning/README.md
+// "Control-plane через REALITY"). Через границу теперь остаётся только сам каскадный
+// data-path (Hop A<->Hop B) плюс этот один, гораздо более узкий канал координации
+// между двумя Platform - вместо N захардненых туннелей (по одному на каждую RU
+// entry-ноду) нужен ровно один.
+//
+// Направление вызова: RU-Platform ВСЕГДА клиент, зарубежный Platform ВСЕГДА только
+// сервер. Health/status опрашивается (pull) со стороны RU-Platform, никогда не
+// проталкивается (push) с зарубежной стороны - зарубежному Platform не нужен
+// исходящий gRPC-клиент вообще, и только ОДНО направление соединения (RU -> зарубеж)
+// должно пережить ТСПУ, а не оба. Выдержит ли обратное направление (зарубеж -> РФ,
+// входящее в РФ-хост) ТСПУ - этим репозиторием НЕ проверено ни в какую сторону, и
+// этот дизайн намеренно избегает необходимости в ответе, а не предполагает его.
+//
+// Аутентификация: НЕ переиспользует Agent-facing mTLS CA (security/mtls_ca.py,
+// contracts/proto/agent_control.proto) - взаимное pinning отдельными
+// самоподписанными сертификатами (security/peering_identity.py), заведённое
+// оператором один раз при провижининге. Статичная связь ровно двух заранее известных
+// сторон - не тот случай, для которого спроектирован auto-issuance CA с
+// одноразовыми токенами на большой полу-доверенный флот Agent'ов; общий CA означал бы
+// равное доверие скомпрометированному Agent enrollment-потоку и "второй Platform" -
+// строго худший blast radius, чем раздельные якоря доверия.
+//
+// Версионирование: тот же принцип, что и в agent_control.proto - обратно
+// несовместимые изменения через package (v2), не breaking change в v1 без
+// согласования. Независимая версия от agent_control.proto намеренно - разный
+// жизненный цикл (два стабильных, заранее спровижененных пира против большого
+// динамического полу-доверенного флота), совмещение версий без пользы.
+
+syntax = "proto3";
+
+package distvpn.peering.v1;
+
+option go_package = "distvpn/peering/v1;peeringv1";
+
+service PlatformPeering {
+  // Запросить у зарубежного Platform выделение exit-ноды под конкретный удалённый
+  // каскад - аналог того, что раньше делал прямой INSERT в CascadeExitNode/
+  // ExitLinkAllocation одним и тем же процессом (см. models/exit_link_allocation.py),
+  // когда Platform ещё не была расколота. Идемпотентно по (remote_cascade_id,
+  // exit_node_id) на стороне сервера - повторный вызов с теми же двумя полями не
+  // создаёт вторую аллокацию (см. models/exit_link_allocation.py's UniqueConstraint).
+  rpc ProvisionExitLink(ProvisionExitLinkRequest) returns (ProvisionExitLinkResponse);
+
+  // Освободить ранее выделенную связь - вызывается при удалении каскада
+  // (DELETE /cascades/{id}) или при выводе exit-ноды из эксплуатации.
+  rpc ReleaseExitLink(ReleaseExitLinkRequest) returns (ReleaseExitLinkResponse);
+
+  // Попросить зарубежный Platform переключить свою сторону конкретной связи на
+  // другой Hop B пресет/транспорт (services/link_negotiation.py, ротация при
+  // неудачном подключении) - зарубежная сторона сама диспатчит соответствующий
+  // AddOutbound/RemoveOutbound на СВОЮ exit-ноду через уже существующий командный
+  // механизм (grpc_server/servicer.py), RU-Platform лишь просит и получает
+  // подтверждённые новые публичные ключи.
+  rpc SwitchLinkPreset(SwitchLinkPresetRequest) returns (SwitchLinkPresetResponse);
+
+  // Health/status pull - см. module-level комментарий про направление вызова выше.
+  // Пустой remote_cascade_id = все связи, которые этот peer_platform_id вообще знает.
+  rpc ListExitLinks(ListExitLinksRequest) returns (ListExitLinksResponse);
+}
+
+message ProvisionExitLinkRequest {
+  string remote_cascade_id = 1; // RU-стороны Cascade.id - непрозрачный для зарубежной стороны, только для корреляции/отображения
+  string exit_node_id = 2;      // Node.id ИМЕННО зарубежной стороны (её собственная нода)
+  string initial_preset = 3;    // напр. "p1" - см. services/xray_templates.py HOPB_PRESET_ROTATION
+}
+
+message ProvisionExitLinkResponse {
+  bool accepted = 1;
+  string reason = 2; // заполнено, если accepted=false (неизвестный exit_node_id, нода не HEALTHY, ...)
+  string link_id = 3; // зарубежной стороны ExitLinkAllocation.id - RU обязана сохранить и передавать на каждом последующем вызове про эту связь
+  string hopb_reality_public_key = 4;
+  string hopb_reality_short_id = 5;
+  string endpoint_address = 6;
+}
+
+message ReleaseExitLinkRequest {
+  string link_id = 1;
+}
+message ReleaseExitLinkResponse {
+  bool released = 1;
+}
+
+message SwitchLinkPresetRequest {
+  string link_id = 1;
+  string preset = 2;
+}
+message SwitchLinkPresetResponse {
+  bool accepted = 1;
+  string reason = 2;
+  // Может смениться при переключении пресета - RU обязана перечитать, не
+  // полагаться, что публичный ключ остался тем же, что был в ProvisionExitLinkResponse.
+  string hopb_reality_public_key = 3;
+  string hopb_reality_short_id = 4;
+}
+
+message ListExitLinksRequest {
+  string remote_cascade_id = 1; // пусто = все связи этого пира
+}
+message ListExitLinksResponse {
+  repeated ExitLinkSummary links = 1;
+}
+message ExitLinkSummary {
+  string link_id = 1;
+  string exit_node_id = 2;
+  string active_preset = 3;
+  LinkHealthStatus status = 4;
+}
+enum LinkHealthStatus {
+  LINK_HEALTH_STATUS_UNSPECIFIED = 0;
+  LINK_HEALTH_STATUS_UP = 1;
+  LINK_HEALTH_STATUS_DEGRADED = 2;
+  LINK_HEALTH_STATUS_DOWN = 3;
+}
