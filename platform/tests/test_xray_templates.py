@@ -57,9 +57,9 @@ def test_hopb_outbound_and_inbound_agree_on_the_same_donor_for_the_same_link() -
     client-role outbound's `serverName` must match what the server-role inbound accepts
     in `serverNames`."""
     outbound = json.loads(
-        xray.build_hopb_outbound_json("cascade-1", "exit-1", "203.0.113.5", "pub-key", "short-id")
+        xray.build_hopb_outbound_json("cascade-1", "exit-1", "203.0.113.5", "p1", "pub-key", "short-id")
     )
-    inbound = json.loads(xray.build_hopb_inbound_json("cascade-1", "exit-1", "priv-key", "short-id"))
+    inbound = json.loads(xray.build_hopb_inbound_json("cascade-1", "exit-1", "p1", "priv-key", "short-id"))
 
     outbound_donor = outbound["streamSettings"]["realitySettings"]["serverName"]
     inbound_donor = inbound["streamSettings"]["realitySettings"]["serverNames"][0]
@@ -72,9 +72,62 @@ def test_hopb_inbound_donor_is_keyed_on_both_cascade_and_exit_node() -> None:
     per-link selection. Verified directly against _select_reality_donor rather than by
     hoping two arbitrary exit_node_id values happen to hash to different pool entries
     (a 4-entry pool makes that flaky)."""
-    inbound = json.loads(xray.build_hopb_inbound_json("cascade-1", "exit-a", "priv-key", "short-id"))
+    inbound = json.loads(xray.build_hopb_inbound_json("cascade-1", "exit-a", "p1", "priv-key", "short-id"))
     donor = inbound["streamSettings"]["realitySettings"]["serverNames"][0]
     assert donor == xray._select_reality_donor("cascade-1:exit-a")
+
+
+def test_hopb_p1_has_no_transport_settings_key() -> None:
+    """raw/tcp is the implicit default Xray transport - no "<network>Settings" key is
+    needed (agent/src/dist_vpn_agent/xray_client.py's _parse_settings defaults to an
+    empty dict via data.get(settings_key, {}) when the key is absent), same shape as
+    every cascade created before slice 11 already produced."""
+    outbound = json.loads(xray.build_hopb_outbound_json("c1", "e1", "203.0.113.5", "p1", "pub", "sid"))
+    assert outbound["streamSettings"]["network"] == "raw"
+    assert "xhttpSettings" not in outbound["streamSettings"]
+    assert "grpcSettings" not in outbound["streamSettings"]
+
+
+def test_hopb_p2_uses_xhttp_transport_with_matching_path_both_sides() -> None:
+    outbound = json.loads(xray.build_hopb_outbound_json("c1", "e1", "203.0.113.5", "p2", "pub", "sid"))
+    inbound = json.loads(xray.build_hopb_inbound_json("c1", "e1", "p2", "priv", "sid"))
+
+    assert outbound["streamSettings"]["network"] == "xhttp"
+    assert inbound["streamSettings"]["network"] == "xhttp"
+    assert outbound["streamSettings"]["xhttpSettings"]["path"] == xray.xhttp_path("c1", "e1")
+    assert inbound["streamSettings"]["xhttpSettings"]["path"] == xray.xhttp_path("c1", "e1")
+    # security/realitySettings shape is unaffected by preset - only the transport varies.
+    assert outbound["streamSettings"]["security"] == "reality"
+    assert inbound["streamSettings"]["security"] == "reality"
+
+
+def test_hopb_p3_uses_grpc_transport_with_matching_service_name_both_sides() -> None:
+    outbound = json.loads(xray.build_hopb_outbound_json("c1", "e1", "203.0.113.5", "p3", "pub", "sid"))
+    inbound = json.loads(xray.build_hopb_inbound_json("c1", "e1", "p3", "priv", "sid"))
+
+    assert outbound["streamSettings"]["network"] == "grpc"
+    assert inbound["streamSettings"]["network"] == "grpc"
+    service_name = xray.grpc_service_name("c1", "e1")
+    assert outbound["streamSettings"]["grpcSettings"]["serviceName"] == service_name
+    assert inbound["streamSettings"]["grpcSettings"]["serviceName"] == service_name
+
+
+def test_hopb_xhttp_and_grpc_paths_differ_per_link() -> None:
+    """Same derived-from-id pattern as p4_ws_path - two different (cascade, exit_node)
+    pairs must not collide onto the same path/serviceName."""
+    assert xray.xhttp_path("c1", "e1") != xray.xhttp_path("c1", "e2")
+    assert xray.grpc_service_name("c1", "e1") != xray.grpc_service_name("c1", "e2")
+
+
+def test_hopb_unsupported_preset_raises() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="unsupported Hop B preset"):
+        xray.build_hopb_outbound_json("c1", "e1", "203.0.113.5", "p99", "pub", "sid")
+
+
+def test_hopb_preset_rotation_order() -> None:
+    assert xray.HOPB_PRESET_ROTATION == ["p1", "p2", "p3"]
 
 
 def test_p4_ws_path_is_deterministic_and_cascade_specific() -> None:

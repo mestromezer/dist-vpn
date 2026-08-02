@@ -12,12 +12,13 @@ building grpc.ssl_server_credentials, since the pinned peer_cert_pem IS the serv
 only trust root - a connection could not have reached this servicer at all unless it
 already authenticated as that specific peer).
 
-Preset-aware dispatch (xray_templates.build_hopb_inbound_json gaining a `preset`
-parameter) lands in slice 11 - this slice calls the current P1-only signature, so
-SwitchLinkPreset updates the stored active_preset/regenerates REALITY keys and
-re-dispatches, but does not yet change the actual wire transport. Real per-preset
-rotation becomes meaningful once slice 11's builders exist; this slice is the
-plumbing, not that yet.
+SwitchLinkPreset dispatches a real transport change (services/xray_templates.py's
+`preset`-aware build_hopb_inbound_json, slice 11) - a RemoveInbound+AddInbound pair
+with fresh REALITY keys, since Xray has no in-place "change an existing inbound's
+transport" operation. The actual WHEN-to-switch decision (detecting a link is down,
+picking the next preset in HOPB_PRESET_ROTATION) lives in services/link_negotiation.py
+(slice 12) - this servicer only executes a switch once asked, it never decides to ask
+for one itself.
 """
 from __future__ import annotations
 
@@ -115,7 +116,7 @@ class PlatformPeeringServicer(pb_grpc.PlatformPeeringServicer):
                     command_id=new_command_id(),
                     add_inbound=agent_pb.AddInbound(
                         inbound_json=xray.build_hopb_inbound_json(
-                            request.remote_cascade_id, exit_node.id, private_key, short_id
+                            request.remote_cascade_id, exit_node.id, preset, private_key, short_id
                         )
                     ),
                 ),
@@ -169,17 +170,17 @@ class PlatformPeeringServicer(pb_grpc.PlatformPeeringServicer):
                 agent_pb.Command(command_id=new_command_id(), remove_inbound=agent_pb.RemoveInbound(tag=inbound_tag)),
                 context=f"peering switch-preset {allocation.id} remove old inbound",
             )
-            # Preset-aware dispatch lands in slice 11 (build_hopb_inbound_json gaining
-            # a `preset` parameter) - this re-dispatches the same P1-only shape with
-            # fresh keys for now, so the link_id/key-rotation plumbing is exercised
-            # end-to-end even before the transport itself can actually vary.
             inbound_ok = await dispatch_best_effort(
                 allocation.exit_node_id,
                 agent_pb.Command(
                     command_id=new_command_id(),
                     add_inbound=agent_pb.AddInbound(
                         inbound_json=xray.build_hopb_inbound_json(
-                            allocation.remote_cascade_id, allocation.exit_node_id, private_key, short_id
+                            allocation.remote_cascade_id,
+                            allocation.exit_node_id,
+                            request.preset,
+                            private_key,
+                            short_id,
                         )
                     ),
                 ),

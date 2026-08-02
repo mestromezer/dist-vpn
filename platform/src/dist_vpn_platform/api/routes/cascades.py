@@ -252,6 +252,7 @@ async def create_cascade(
                         cascade.id,
                         exit_node.id,
                         exit_node.public_address or exit_node.hostname or exit_node.id,
+                        link.active_preset,
                         link.hopb_reality_public_key,
                         link.hopb_reality_short_id,
                     )
@@ -271,7 +272,11 @@ async def create_cascade(
                 command_id=new_command_id(),
                 add_inbound=pb.AddInbound(
                     inbound_json=xray.build_hopb_inbound_json(
-                        cascade.id, exit_node.id, allocation.hopb_reality_private_key, allocation.hopb_reality_short_id
+                        cascade.id,
+                        exit_node.id,
+                        allocation.active_preset,
+                        allocation.hopb_reality_private_key,
+                        allocation.hopb_reality_short_id,
                     )
                 ),
             ),

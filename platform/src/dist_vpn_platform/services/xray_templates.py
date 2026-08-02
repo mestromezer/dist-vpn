@@ -248,10 +248,74 @@ def build_hopa_inbound_json(cascade_id: str, hop_a_preset: str, reality_private_
     )
 
 
+# Hop B preset rotation (services/link_negotiation.py, slice 12, iterates through
+# these in order on a failed connectivity test). P1 (raw REALITY) is the default/
+# first-tried preset, matching every pre-slice-11 cascade's implicit behavior - a
+# cascade created before this slice, or with no preset negotiation ever run, still
+# behaves exactly as before. P4 (real-TLS-cert backhaul, mirroring Hop A's
+# build_hopa_p4_inbound_json) is deliberately NOT included here yet - it would need an
+# exit-node equivalent of Node.p4_domain, a materially bigger schema question than
+# reusing the transport variety P2/P3 already add; deprioritized until P1-P3 alone are
+# shown insufficient (see platform/README.md).
+HOPB_PRESET_ROTATION: list[str] = ["p1", "p2", "p3"]
+
+
+def xhttp_path(cascade_id: str, exit_node_id: str) -> str:
+    """Derived, not persisted - same pattern as p4_ws_path (avoids every Hop B xhttp
+    link sharing one obvious literal path; not a security boundary, REALITY/the VLESS
+    UUID are)."""
+    digest = hashlib.sha256(f"{cascade_id}:{exit_node_id}".encode("utf-8")).hexdigest()[:12]
+    return f"/x-{digest}"
+
+
+def grpc_service_name(cascade_id: str, exit_node_id: str) -> str:
+    """Derived, not persisted - same rationale as xhttp_path above. gRPC's
+    serviceName must be a valid gRPC service-name-shaped path segment (no leading
+    slash, unlike xhttp's path) - see transport/internet/grpc/config.proto's
+    `service_name` field, vendored at agent/vendor/xray-proto/transport/internet/grpc/
+    config.proto."""
+    digest = hashlib.sha256(f"{cascade_id}:{exit_node_id}".encode("utf-8")).hexdigest()[:12]
+    return f"g-{digest}"
+
+
+def _hopb_stream_settings(preset: str, cascade_id: str, exit_node_id: str) -> dict:
+    """The `network`/`<network>Settings` portion of Hop B's streamSettings, shared by
+    build_hopb_outbound_json/build_hopb_inbound_json below - only the transport varies
+    by preset, `security: "reality"`/`realitySettings` stay identical in shape on both
+    functions regardless of preset (only the REALITY key material itself, which the
+    callers already handle, differs).
+
+    Field names/registered transport names verified against the vendored Xray-core
+    proto (agent/vendor/xray-proto/transport/internet/{splithttp,grpc}/config.proto,
+    tag v26.7.11) and agent/src/dist_vpn_agent/xray_client.py's own
+    `_TRANSPORT_SETTINGS` mapping, not guessed - `xhttpSettings.path`/`.mode` are
+    already lowerCamelCase in the proto's own field names (no JSON-casing transform
+    involved); `grpcSettings.serviceName` is the JSON-camelCase form of the proto's
+    `service_name` (confirmed via protobuf's standard snake_case->camelCase JSON
+    mapping, the same one `agent/src/dist_vpn_agent/xray_client.py::_parse_settings`
+    relies on via `google.protobuf.json_format`).
+    """
+    if preset == "p1":
+        return {"network": "raw"}
+    if preset == "p2":
+        donor = _select_reality_donor(f"{cascade_id}:{exit_node_id}")
+        return {
+            "network": "xhttp",
+            "xhttpSettings": {"path": xhttp_path(cascade_id, exit_node_id), "mode": "auto", "host": donor},
+        }
+    if preset == "p3":
+        return {
+            "network": "grpc",
+            "grpcSettings": {"serviceName": grpc_service_name(cascade_id, exit_node_id)},
+        }
+    raise ValueError(f"unsupported Hop B preset: {preset!r} (supported: {HOPB_PRESET_ROTATION})")
+
+
 def build_hopb_outbound_json(
     cascade_id: str,
     exit_node_id: str,
     exit_endpoint: str,
+    preset: str,
     reality_public_key: str,
     reality_short_id: str,
 ) -> str:
@@ -259,6 +323,12 @@ def build_hopb_outbound_json(
     with hopb_outbound_tag_prefix() so the native balancer's `selector` can pick up
     additions to the candidate pool (TZ-5 §4.2 / TZ-3 §0 "Нативный failover
     balancer+observatory+fallbackTag").
+
+    `preset` (new, slice 11) selects the transport envelope - see
+    _hopb_stream_settings and HOPB_PRESET_ROTATION above. Callers (services/
+    link_negotiation.py) must dispatch a matching RemoveOutbound+AddOutbound pair when
+    switching a link's preset - Xray has no in-place "change an existing outbound's
+    transport" operation, only add/remove.
 
     `reality_public_key`/`reality_short_id` are the *exit* node's Hop B inbound identity
     (build_hopb_inbound_json below) - an outbound acting as a REALITY client only ever
@@ -286,7 +356,7 @@ def build_hopb_outbound_json(
                 ]
             },
             "streamSettings": {
-                "network": "raw",
+                **_hopb_stream_settings(preset, cascade_id, exit_node_id),
                 "security": "reality",
                 "realitySettings": {
                     "show": False,
@@ -296,20 +366,25 @@ def build_hopb_outbound_json(
                     "shortId": reality_short_id,
                 },
             },
+            "_presetHint": preset,
         }
     )
 
 
-def build_hopb_inbound_json(cascade_id: str, exit_node_id: str, reality_private_key: str, reality_short_id: str) -> str:
+def build_hopb_inbound_json(
+    cascade_id: str, exit_node_id: str, preset: str, reality_private_key: str, reality_short_id: str
+) -> str:
     """Exit-node inbound accepting the chained connection from the entry node's Hop B
-    outbound above (same transport/security settings on both ends of that hop).
-    `reality_private_key`/`reality_short_id` are this exit node's own Hop B REALITY
-    identity for this (cascade, exit_node) pairing - see models/cascade.py
-    CascadeExitNode.hopb_reality_*.
+    outbound above (same transport/security settings on both ends of that hop, `preset`
+    must match what build_hopb_outbound_json was called with for this same link - see
+    that function's docstring). `reality_private_key`/`reality_short_id` are this exit
+    node's own Hop B REALITY identity for this (cascade, exit_node) pairing - see
+    models/exit_link_allocation.py's ExitLinkAllocation.hopb_reality_*.
 
-    `exit_node_id` (new) is needed only to derive the same REALITY donor
-    build_hopb_outbound_json picked for this (cascade_id, exit_node_id) pair - see that
-    function's docstring. Not persisted anywhere new; the caller already has both ids."""
+    `exit_node_id` is needed only to derive the same REALITY donor/xhttp-path/grpc-
+    service-name build_hopb_outbound_json picked for this (cascade_id, exit_node_id)
+    pair - see that function's docstring. Not persisted anywhere new; the caller
+    already has both ids."""
     donor = _select_reality_donor(f"{cascade_id}:{exit_node_id}")
     return json.dumps(
         {
@@ -319,7 +394,7 @@ def build_hopb_inbound_json(cascade_id: str, exit_node_id: str, reality_private_
             "protocol": "vless",
             "settings": {"clients": [], "decryption": "none"},
             "streamSettings": {
-                "network": "raw",
+                **_hopb_stream_settings(preset, cascade_id, exit_node_id),
                 "security": "reality",
                 "realitySettings": {
                     "show": False,
