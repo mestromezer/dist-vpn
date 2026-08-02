@@ -31,7 +31,7 @@
     dest: "{{ agent_mtls_ca_cert_dest }}"
     owner: root
     group: root
-    mode: "0644" # CA-сертификат -- публичный якорь доверия, не секрет сам по себе
+    mode: "0644"  # CA-сертификат -- публичный якорь доверия, не секрет сам по себе
   when: not agent_insecure_dev_mode
 
 - name: Скопировать клиентский mTLS-сертификат ноды (опционально, см. defaults/main.yml)
@@ -126,7 +126,7 @@
 - name: Создать приватную Docker-сеть для Agent↔docker-socket-proxy
   community.docker.docker_network:
     name: "{{ agent_docker_proxy_network }}"
-    internal: true # ни один из двух контейнеров в этой сети не получает выход в интернет через неё
+    internal: true  # ни один из двух контейнеров в этой сети не получает выход в интернет через неё
 
 - name: Запустить docker-socket-proxy (единственный держатель реального docker.sock)
   community.docker.docker_container:
@@ -146,10 +146,87 @@
       # NODES, PLUGINS, SYSTEM, AUTH, BUILD, COMMIT, CONFIGS, DISTRIBUTION,
       # EVENTS, INFO, TASKS...) намеренно не выставлено — deny-by-default.
 
+# Найдено при реальном two-VDS деплое: agent_docker_proxy_network создаётся с
+# `internal: true` (см. выше) намеренно -- ни Agent, ни docker-socket-proxy не
+# должны иметь выход в интернет ЧЕРЕЗ ЭТУ сеть. Но это единственная сеть, в
+# которую этот факт раньше подключал контейнер Agent'а целиком -- то есть Agent
+# был вообще без выхода наружу, включая исходящее mTLS-соединение к самой
+# Platform (TZ-4 SS5.1 требует именно исходящее соединение). Фикс -- подключить
+# Agent ДОПОЛНИТЕЛЬНО к обычному Docker bridge (NAT наружу), оставив
+# internal-сеть только для общения с docker-socket-proxy.
 - name: Собрать список Docker-сетей для контейнера Agent'а
   ansible.builtin.set_fact:
     agent_container_networks:
       - name: "{{ agent_docker_proxy_network }}"
+      - name: bridge
+
+# Найдено при реальном two-VDS деплое -- см. defaults/main.yml
+# (agent_xray_config_host_dir) за полным обоснованием: без этого Agent падает в
+# crash loop с PermissionError на каждом старте, пытаясь создать /etc/dist-vpn
+# внутри собственной эфемерной ФС контейнера, куда его непривилегированный
+# пользователь писать не может.
+- name: Создать host-каталог конфига Xray, который Agent пишет и передаёт docker_manager.py
+  ansible.builtin.file:
+    path: "{{ agent_xray_config_host_dir }}"
+    state: directory
+    owner: "{{ agent_container_uid }}"
+    group: "{{ agent_container_gid }}"
+    mode: "0755"
+
+- name: Добавить bind-mount host-каталога конфига Xray (тот же путь по обе стороны)
+  ansible.builtin.set_fact:
+    agent_container_volumes: "{{ agent_container_volumes | default([]) + [(agent_xray_config_host_dir ~ ':' ~ agent_xray_config_host_dir)] }}"
+
+# Найдено при реальном two-VDS деплое: agent/src/dist_vpn_agent/config.py типизирует
+# mtls_client_cert_path/mtls_client_key_path как `Path | None = Field(default=None)`
+# и проверяет отсутствие через `is None` (control_client.py::_build_channel). Но
+# pydantic-settings коэрсит ПУСТУЮ СТРОКУ из env-переменной в `Path('')`, что
+# нормализуется в `Path('.')` -- НЕ `None` -- а `Path('.')` истинен в булевом
+# контексте (у Path нет __bool__/__len__), так что старый код ниже
+# (`AGENT_MTLS_CLIENT_KEY_PATH: '' if not provided`) заставлял Agent пытаться
+# читать текущую рабочую директорию как файл ключа при каждом штатном enrollment
+# (когда клиентский сертификат сознательно не передан -- обычный путь, см.
+# defaults/main.yml). Фикс -- не передавать эти переменные в контейнер ВООБЩЕ,
+# когда они не заданы, а не передавать их пустой строкой: тогда
+# pydantic-settings использует свой Python-default (None), а не коэрсит строку.
+# Когда control-plane-туннель включён (agent_control_plane_tunnel_enabled, см.
+# defaults/main.yml), Agent должен дозваниваться не до настоящего адреса Platform
+# (тот самый путь, который режет ТСПУ), а до локального dokodemo-door sidecar'а на
+# loopback (tasks/control_plane_tunnel.yml запустится ПОСЛЕ этого файла и разделит
+# с Agent'ом сетевой неймспейс). Переопределяем здесь, а не полагаемся на то, что
+# оператор вручную синхронизирует agent_platform_address с этим фактом в vault —
+# один флаг должен быть достаточным, без риска рассинхронизации.
+- name: "Определить эффективный AGENT_PLATFORM_ADDRESS (локальный туннель либо прямой адрес)"
+  ansible.builtin.set_fact:
+    agent_effective_platform_address: >-
+      {{ ('127.0.0.1:' ~ agent_control_plane_tunnel_local_strict_port)
+         if (agent_control_plane_tunnel_enabled | bool)
+         else agent_platform_address }}
+
+- name: Собрать переменные окружения контейнера Agent'а (см. коммент выше про Path('') != None)
+  ansible.builtin.set_fact:
+    agent_container_env: >-
+      {{
+        {
+          'AGENT_PLATFORM_ADDRESS': agent_effective_platform_address,
+          'AGENT_ENROLLMENT_TOKEN': agent_enrollment_token,
+          'AGENT_HOSTNAME': inventory_hostname,
+          'AGENT_REQUESTED_ROLE': agent_requested_role,
+          'AGENT_HEARTBEAT_INTERVAL_SECONDS': agent_heartbeat_interval_seconds | string,
+          'AGENT_LOG_LEVEL': agent_log_level,
+          'AGENT_INSECURE_DEV_MODE': agent_insecure_dev_mode | string | lower,
+          'AGENT_MTLS_CA_CERT_PATH': (agent_container_ca_path if not agent_insecure_dev_mode else ''),
+          'DOCKER_HOST': 'tcp://' ~ agent_docker_proxy_container_name ~ ':2375',
+          'AGENT_XRAY_CONFIG_HOST_PATH': agent_xray_config_host_path,
+        }
+        | combine(
+          {
+            'AGENT_MTLS_CLIENT_CERT_PATH': agent_container_client_cert_path,
+            'AGENT_MTLS_CLIENT_KEY_PATH': agent_container_client_key_path,
+          } if agent_client_cert_provided else {}
+        )
+      }}
+  no_log: true
 
 # env передаётся через Docker Engine API (community.docker.docker_container
 # использует docker-py, не шеллит `docker run -e ...`), так что токен/адрес
@@ -171,18 +248,5 @@
     restart_policy: "{{ agent_restart_policy }}"
     volumes: "{{ agent_container_volumes | default([]) }}"
     networks: "{{ agent_container_networks | default([]) }}"
-    env:
-      AGENT_PLATFORM_ADDRESS: "{{ agent_platform_address }}"
-      AGENT_ENROLLMENT_TOKEN: "{{ agent_enrollment_token }}"
-      AGENT_HOSTNAME: "{{ inventory_hostname }}"
-      AGENT_REQUESTED_ROLE: "{{ agent_requested_role }}"
-      AGENT_HEARTBEAT_INTERVAL_SECONDS: "{{ agent_heartbeat_interval_seconds | string }}"
-      AGENT_LOG_LEVEL: "{{ agent_log_level }}"
-      AGENT_INSECURE_DEV_MODE: "{{ agent_insecure_dev_mode | string | lower }}"
-      AGENT_MTLS_CA_CERT_PATH: "{{ agent_container_ca_path if not agent_insecure_dev_mode else '' }}"
-      AGENT_MTLS_CLIENT_CERT_PATH: "{{ agent_container_client_cert_path if agent_client_cert_provided else '' }}"
-      AGENT_MTLS_CLIENT_KEY_PATH: "{{ agent_container_client_key_path if agent_client_cert_provided else '' }}"
-      # docker-py's docker.from_env() (docker_manager.py) reads this natively - no
-      # Agent code change needed. Points at the scoped proxy, never the real socket.
-      DOCKER_HOST: "tcp://{{ agent_docker_proxy_container_name }}:2375"
+    env: "{{ agent_container_env }}"
   no_log: true

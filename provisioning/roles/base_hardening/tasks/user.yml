@@ -1,14 +1,29 @@
 ---
-- name: Убедиться, что публичный SSH-ключ оператора передан
+# ⚠️ Найдено при реальном bootstrap-прогоне на 3 VDS (см. README «-e "key=значение
+# с пробелами" теряет хвост»): инлайновый -e "provision_user_ssh_public_key=$(cat
+# ...)" незаметно обрезает значение до первого пробела на уровне ansible-core CLI
+# ДО того, как эта задача вообще видит переменную — "length > 0" пропускал усечённый
+# "ssh-ed25519" (без base64-blob) как валидный, authorized_keys записывался с
+# нерабочим ключом, PasswordAuthentication уже отключён к этому моменту роли —
+# результат: полный lockout ноды, восстановимый только через консоль хостера, не
+# SSH. Проверка на пробел (валидный authorized_keys-ключ — минимум "тип base64",
+# т.е. ДВА токена) ловит именно этот класс порчи явной ошибкой здесь, а не тихим
+# созданием нерабочего доступа.
+- name: Убедиться, что публичный SSH-ключ оператора передан и не выглядит обрезанным
   ansible.builtin.assert:
     that:
       - provision_user_ssh_public_key | default('') | length > 0
+      - provision_user_ssh_public_key | default('') | trim | split(' ') | length >= 2
     fail_msg: >-
-      provision_user_ssh_public_key пуст (group_vars/all/main.yml). Передайте
-      публичный SSH-ключ оператора явно, например:
-      -e "provision_user_ssh_public_key=$(cat ~/.ssh/id_ed25519.pub)". Без
-      него после отключения PasswordAuthentication доступ к ноде будет
-      потерян — задача осознанно останавливается здесь, а не продолжает.
+      provision_user_ssh_public_key пуст или выглядит обрезанным (меньше двух
+      токенов "тип base64[ comment]" — валидный SSH-публичный-ключ так не
+      выглядит). Частая причина: -e "provision_user_ssh_public_key=$(cat
+      ~/.ssh/id_ed25519.pub)" обрезает значение по первому пробелу на уровне
+      ansible-core CLI — используйте -e @extravars.json (см. README, "-e
+      "key=значение с пробелами" теряет хвост") вместо инлайнового -e для этого
+      значения. Без корректного ключа после отключения PasswordAuthentication
+      доступ к ноде будет потерян — задача осознанно останавливается здесь, а
+      не продолжает.
 
 - name: "Создать sudo-пользователя для повседневной работы: {{ provision_user }}"
   ansible.builtin.user:
@@ -29,14 +44,20 @@
     group: "{{ provision_user }}"
     mode: "0700"
 
+# ansible.posix.authorized_key 2.2.2 падает "list index out of range" на
+# Ubuntu 24.04 (найдено при реальном деплое, воспроизведено дважды) —
+# lineinfile даёт ту же идемпотентность (не дублирует строку при повторном
+# прогоне) без внешней collection-зависимости для этого шага.
 - name: Добавить публичный ключ оператора в authorized_keys
-  ansible.posix.authorized_key:
-    user: "{{ provision_user }}"
-    key: "{{ provision_user_ssh_public_key }}"
-    state: present
-    exclusive: false
+  ansible.builtin.lineinfile:
+    path: "/home/{{ provision_user }}/.ssh/authorized_keys"
+    line: "{{ provision_user_ssh_public_key }}"
+    create: true
+    owner: "{{ provision_user }}"
+    group: "{{ provision_user }}"
+    mode: "0600"
 
-- name: "Разрешить sudo без пароля для {{ provision_user }} (если включено)"
+- name: "Разрешить sudo без пароля (если включено) для {{ provision_user }}"
   ansible.builtin.copy:
     dest: "/etc/sudoers.d/90-{{ provision_user }}-nopasswd"
     content: "{{ provision_user }} ALL=(ALL) NOPASSWD:ALL\n"

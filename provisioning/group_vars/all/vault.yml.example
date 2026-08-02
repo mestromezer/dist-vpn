@@ -16,6 +16,17 @@
 # group_vars/all/vault.yml (реальный, зашифрованный файл) — в
 # provisioning/.gitignore, в репозиторий не попадает никогда.
 
+# GitHub Personal Access Token (fine-grained, read-only, scoped ТОЛЬКО на
+# репозиторий dist-vpn) — нужен, только если репозиторий приватный, для
+# клонирования исходников на целевые VDS (roles/agent_install/tasks/image.yml,
+# roles/platform_install/tasks/source.yml — agent_source_git_repo_authenticated/
+# platform_source_git_repo_authenticated встраивают его в HTTPS URL). Пусто —
+# клонирование пойдёт без аутентификации (репозиторий публичный). Создать:
+# GitHub -> Settings -> Developer settings -> Fine-grained personal access
+# tokens -> New token -> Repository access: Only select repositories -> этот
+# репозиторий -> Permissions: Contents: Read-only, больше ничего не давать.
+vault_github_pat: ""
+
 # Пароль sudo для provision_user, используемый САМИМ Ansible при
 # необходимости become на уже захарденной ноде (PasswordAuthentication no,
 # подключение только по ключу — но sudo внутри сессии может требовать пароль
@@ -28,8 +39,11 @@ ansible_become_password: "CHANGE_ME_generate_with_openssl_rand_-base64_24"
 # (roles/base_hardening/tasks/user.yml, ansible.builtin.user: password:).
 # Значение ansible_become_password (plaintext) и хэш ниже ДОЛЖНЫ
 # соответствовать одному и тому же паролю. Сгенерировать хэш:
-#   python3 -c "import crypt,getpass; print(crypt.crypt(getpass.getpass(), crypt.mksalt(crypt.METHOD_SHA512)))"
-# (или mkpasswd --method=sha-512 из пакета whois на Debian/Ubuntu)
+#   openssl passwd -6 -salt "$(openssl rand -hex 8)" "$ansible_become_password"
+# (mkpasswd --method=sha-512 из пакета whois на Debian/Ubuntu — тоже подходит.
+# ВНИМАНИЕ: python3 -c "import crypt..." — устаревший способ из более старой
+# версии этого файла — модуль crypt удалён из стандартной библиотеки в Python
+# 3.13+, найдено при реальном деплое; не полагайтесь на него.)
 vault_provision_user_password_hash: "$6$CHANGE_ME$replace_with_a_real_sha512_crypt_hash"
 
 # --- Используются roles/agent_install (ТЗ-4 §5.2, ТЗ-7 §4.3) — эти два
@@ -50,3 +64,47 @@ agent_platform_address: "CHANGE_ME_platform.example.internal:PORT"
 # только через это Vault-значение. Соответствует env-переменной
 # AGENT_ENROLLMENT_TOKEN (agent/README.md).
 agent_enrollment_token: "CHANGE_ME_one_time_token_from_platform"
+
+# --- Используются roles/platform_install (roles/platform_install/tasks/
+# preflight.yml проверяет, что оба заданы и не остались CHANGE_ME-плейсхолдером) ---
+# Добавлены позже agent_platform_address/agent_enrollment_token выше — найдено при
+# валидации реального деплоя, что Platform до этого разворачивался вручную с
+# дефолтными dev-секретами прямо из platform/docker-compose.yml
+# ("platform"/"dev-only-insecure-secret-change-me") — production-раскатка не
+# должна оставлять их как есть.
+
+# Секрет подписи JWT (ТЗ-5 §6.3) — соответствует PLATFORM_JWT_SECRET_KEY.
+# Сгенерировать: openssl rand -base64 32
+vault_platform_jwt_secret_key: "CHANGE_ME_generate_with_openssl_rand_-base64_32"
+
+# Пароль пользователя Postgres `platform` (роль db в platform/docker-compose.yml).
+# Сгенерировать: openssl rand -base64 24
+vault_platform_postgres_password: "CHANGE_ME_generate_with_openssl_rand_-base64_24"
+
+# --- Control-plane REALITY (roles/platform_install/tasks/control_gateway.yml +
+# roles/agent_install/tasks/control_plane_tunnel.yml) --- Нужны, только если хотя бы
+# одна entry-нода включает agent_control_plane_tunnel_enabled: true (см.
+# provisioning/README.md, "Control-plane через REALITY, зачем" — обход
+# ТСПУ-фильтрации control-plane канала для нод в РФ). Один общий комплект ключей
+# на весь control-gateway (не per-node) — см. честную оговорку в
+# roles/platform_install/defaults/main.yml (platform_control_gateway_client_uuid)
+# за тем, что это упрощает и чем платит.
+#
+# Сгенерировать пару ключ+shortId ТЕМ ЖЕ кодом, что уже генерирует REALITY-ключи
+# для пользовательских каскадов Platform (гарантированно верная кодировка для
+# Xray-core — см. platform/src/dist_vpn_platform/security/reality_keys.py):
+#   cd platform && python3 -c "
+#   import sys; sys.path.insert(0, 'src')
+#   from dist_vpn_platform.security.reality_keys import generate_reality_keypair, generate_short_id
+#   priv, pub = generate_reality_keypair()
+#   print(f'private={priv}\npublic={pub}\nshort_id={generate_short_id()}')"
+# private -> vault_control_gateway_reality_private_key (ТОЛЬКО на Platform-ноде).
+# public  -> vault_control_gateway_reality_public_key (на entry-нодах, не секрет
+#            сам по себе, но храним рядом для единообразия).
+vault_control_gateway_reality_private_key: "CHANGE_ME_generate_reality_keypair_see_comment_above"
+vault_control_gateway_reality_public_key: "CHANGE_ME_generate_reality_keypair_see_comment_above"
+vault_control_gateway_reality_short_id: "CHANGE_ME_generate_short_id_see_comment_above"
+
+# VLESS-клиентский uuid, которым entry-ноды представляются control-gateway'ю.
+# Сгенерировать: python3 -c "import uuid; print(uuid.uuid4())"
+vault_control_gateway_client_uuid: "CHANGE_ME_generate_with_python_uuid.uuid4"

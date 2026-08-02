@@ -1,0 +1,44 @@
+---
+- name: "Preflight: репозиторий и закреплённая версия исходников Platform заданы"
+  ansible.builtin.assert:
+    that:
+      - platform_source_git_repo | length > 0
+      - platform_source_git_ref | length > 0
+      - platform_source_git_ref not in ['main', 'master', 'HEAD']
+    fail_msg: >-
+      platform_source_git_repo и platform_source_git_ref обязательны (тег или
+      полный commit SHA — НЕ имя ветки, ТЗ-7 §2.2 прямо запрещает паттерн
+      "последняя версия ветки", тот же принцип, что и roles/agent_install).
+      Передайте оба явно, например:
+      -e platform_source_git_repo=... -e platform_source_git_ref=<tag-или-sha>.
+
+- name: Убедиться, что секреты Platform заданы через vault
+  ansible.builtin.assert:
+    that:
+      - platform_jwt_secret_key | default('') | length > 0
+      - "'CHANGE_ME' not in (platform_jwt_secret_key | default(''))"
+      - platform_postgres_password | default('') | length > 0
+      - "'CHANGE_ME' not in (platform_postgres_password | default(''))"
+    fail_msg: >-
+      platform_jwt_secret_key / platform_postgres_password не заданы или
+      оставлены плейсхолдером из group_vars/all/vault.yml.example. Заполните
+      реальный group_vars/all/vault.yml (см. README «Секреты и Vault») —
+      сгенерировать: openssl rand -base64 32 для каждого. Эта роль намеренно
+      не задаёт для них значений по умолчанию — тот же принцип, что и
+      agent_platform_address/agent_enrollment_token в roles/agent_install.
+  no_log: true
+
+- name: "Preflight (control-plane REALITY gateway): обязательные значения заданы"
+  ansible.builtin.assert:
+    that:
+      - platform_control_gateway_private_key | length > 0
+      - platform_control_gateway_short_id | length > 0
+      - platform_control_gateway_client_uuid | length > 0
+    fail_msg: >-
+      platform_control_gateway_enabled: true, но
+      vault_control_gateway_reality_private_key / vault_control_gateway_reality_short_id /
+      vault_control_gateway_client_uuid не заданы в group_vars/all/vault.yml —
+      см. этот файл за инструкцией по генерации (тем же кодом, что уже генерирует
+      REALITY-ключи для пользовательских каскадов Platform,
+      security/reality_keys.py).
+  when: platform_control_gateway_enabled | bool

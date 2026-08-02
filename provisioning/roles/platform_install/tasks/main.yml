@@ -1,0 +1,34 @@
+---
+# Порядок: preflight (проверить секреты/входные данные) -> Docker Python-биндинги
+# (нужны модулям community.docker.*) -> исходники (клонировать) -> стек Platform
+# (docker compose up) -> CA-сертификат (забрать на машину оператора — понадобится
+# для agent_install) -> Caddy (TLS reverse-proxy) -> Admin Client (собрать локально,
+# задеплоить) -> проверка. Применяется после docker_install (см. site.yml) — нужен
+# уже работающий Docker.
+
+- name: Preflight — проверить секреты/входные данные Platform
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Установить Python-биндинги Docker (нужны модулям community.docker.*)
+  ansible.builtin.import_tasks: docker_python_deps.yml
+
+- name: Клонировать исходники Platform на целевой хост
+  ansible.builtin.import_tasks: source.yml
+
+- name: Поднять стек Platform (Postgres + сам сервис) через docker compose
+  ansible.builtin.import_tasks: compose.yml
+
+- name: Забрать CA-сертификат Platform на машину оператора
+  ansible.builtin.import_tasks: ca_cert.yml
+
+- name: Настроить control-plane REALITY gateway (Agent<->Platform для entry-нод в РФ)
+  ansible.builtin.import_tasks: control_gateway.yml
+
+- name: Настроить Caddy (TLS reverse-proxy перед REST API и Admin Client)
+  ansible.builtin.import_tasks: caddy.yml
+
+- name: Собрать и задеплоить Admin Client
+  ansible.builtin.import_tasks: admin_client.yml
+
+- name: Проверить, что Platform реально отвечает через Caddy
+  ansible.builtin.import_tasks: verify.yml

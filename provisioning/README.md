@@ -27,11 +27,20 @@ provisioning/
       vault.yml.example     — ФОРМА секретов (см. «Секреты и Vault» ниже)
     entry_nodes.yml         — role: entry
     exit_nodes.yml          — role: exit
+    platform_nodes.yml      — role: platform
   roles/
     base_hardening/         — пользователь, SSH, ufw, fail2ban, updates, chrony
     docker_install/         — Docker CE из официального apt-репозитория
     agent_install/          — Docker-контейнер Agent'а (сборка/pull образа,
                                enrollment через vault, проверка running)
+    platform_install/       — стек Platform (docker compose: db+сервис),
+                               Caddy (TLS reverse-proxy), сборка+деплой Admin
+                               Client, забор CA-сертификата на машину
+                               оператора — добавлен позже entry/exit, найдено
+                               при реальном деплое (см. roles/platform_install/
+                               defaults/main.yml за полным обоснованием: до
+                               этого Platform разворачивался только вручную
+                               по шагам deploy.md, невоспроизводимо)
   .gitignore                — паттерны, специфичные для provisioning (см. ниже)
   .ansible-lint, .yamllint  — конфигурация линтеров (см. «Что реально проверено»)
 ```
@@ -98,10 +107,63 @@ ansible-playbook -i inventory/hosts.ini site.yml \
 (`agent_platform_address` / `agent_enrollment_token` — не через `-e`, а из
 `group_vars/all/vault.yml`, см. «Секреты и Vault» ниже.)
 
-`~/platform-ca.pem` в примере выше не появляется само — см. «Bootstrap
-mTLS Agent↔Platform: операторский workflow» ниже за пошаговым описанием,
-откуда оператор физически берёт этот файл (кратко: Platform генерирует и
-логирует его при первом собственном деплое).
+`~/platform-ca.pem` в примере выше не появляется само — раньше это был
+отдельный ручной шаг (см. «Bootstrap mTLS Agent↔Platform: операторский
+workflow» ниже за историческим пошаговым описанием). С `roles/platform_install`
+он появляется автоматически: сама роль забирает CA-сертификат на машину
+оператора при первом деплое Platform (см. `platform_ca_cert_local_dest`,
+по умолчанию `~/platform-ca.pem` — совпадает с тем, что ожидают команды выше).
+
+### Platform — тот же поток, роль `platform`
+
+Разворачивается ПЕРВОЙ (у Agent'а при enrollment нет ещё ни CA-сертификата, ни
+enrollment-токена, взять их неоткуда, пока Platform не поднят):
+
+```bash
+ansible-playbook -i inventory/hosts.ini site.yml \
+  -l vds-platform-01 -e role=platform \
+  -e "provision_user_ssh_public_key=$(cat ~/.ssh/id_ed25519.pub)" \
+  -e @platform-extravars.json \
+  --ask-vault-pass
+```
+
+где `platform-extravars.json` (см. «⚠️ `-e "key=значение с пробелами"` теряет
+хвост» ниже за тем, почему JSON-файл, а не инлайн `-e`):
+
+```json
+{
+  "platform_source_git_repo": "git@github.com:<org>/dist-vpn.git",
+  "platform_source_git_ref": "<тег-или-commit-sha>"
+}
+```
+
+(`vault_platform_jwt_secret_key` / `vault_platform_postgres_password` — не
+через `-e`, а из `group_vars/all/vault.yml`, см. «Секреты и Vault» ниже.
+`platform_domain` — опционален, см. `roles/platform_install/defaults/
+main.yml`: пусто = временный самоподписанный сертификат Caddy.)
+
+После успешного прогона: enrollment-токены для entry/exit-нод выпускаются
+через REST API Platform (`POST /api/v1/nodes`, см. `platform/README.md`), не
+этим playbook'ом — provisioning entry/exit-нод и создание/раздача токенов
+остаются раздельными операциями, как и раньше.
+
+### ⚠️ `-e "key=значение с пробелами"` теряет хвост
+
+Найдено при реальном деплое: `ansible-playbook -e "provision_user_ssh_public_key=$(cat
+~/.ssh/id_ed25519.pub)"` (публичный SSH-ключ — строка вида `ssh-ed25519 AAAA... comment`,
+с пробелами) незаметно обрезался ansible-core до первого пробела —
+`ansible.posix.authorized_key` затем падал с невнятным `Module failed: list index out
+of range` (кривой парсинг усечённого ключа), а не понятной ошибкой валидации. Инлайн
+`-e "key=значение"` **безопасен только для значений без пробелов** (адреса, токены,
+теги) — для всего остального (SSH-ключи и любые многословные значения) используйте
+`-e @file.json`:
+
+```bash
+python3 -c 'import json; json.dump({"provision_user_ssh_public_key": open("'"$HOME"'/.ssh/id_ed25519.pub").read().strip()}, open("extravars.json", "w"))'
+ansible-playbook ... -e @extravars.json ...
+```
+
+(файл с секретами/ключами — не коммитить; тот же принцип, что и для `vault.yml`.)
 
 ## Секреты и Vault
 
@@ -169,6 +231,57 @@ ansible-vault encrypt group_vars/all/vault.yml
 - Тот же нюанс касается смены `ssh_port` с 22 на нестандартный порт в одном
   прогоне с самим bootstrap'ом — при следующем запуске обновите
   `ansible_port` в инвентаре.
+
+### ⚠️ Найдено при реальном bootstrap-прогоне на 3 новых VDS: ControlPersist не гарантирует, что весь `site.yml` доедет за один вызов
+
+Абзац выше про ControlPersist («уже установленное соединение не разрывается»)
+верен для задач, которые переиспользуют master-соединение — но подтверждено
+не на всех платах ролей одинаково. Реальный прогон (роль `platform`, свежая
+VDS): `base_hardening` + `docker_install` + первые задачи `platform_install`
+(preflight, `apt install python3-docker`, `apt install git`) отработали
+чисто за один вызов, ЧЕРЕЗ уже установленное root-соединение, несмотря на то
+что `PermitRootLogin no` применился раньше в этом же прогоне — подтверждает
+абзац выше. Но следующая задача (`ansible.builtin.git`, клонирование
+исходников) вызвала `UNREACHABLE: Permission denied (publickey,password)` —
+`ansible.builtin.git` открывает **отдельное** соединение (не через тот же
+persistent control socket, что модули на базе `ansible.builtin.command`/
+raw exec), и к этому моменту root уже реально не пускает. Причина именно в
+конкретном модуле/типе задачи, а не в истечении ControlPersist по таймауту
+(предыдущие задачи в том же прогоне отрабатывали за секунды до этой).
+
+**Практический вывод**: не полагайтесь на «один прогон точно докатится до
+конца» даже с учётом ControlPersist — по крайней мере `ansible.builtin.git`
+(и, вероятно, другие задачи, открывающие соединение не через основной control
+socket) может внезапно потребовать свежую SSH-сессию посреди уже
+захарденного прогона. План на этот случай:
+
+1. Первый прогон как `root` — ожидаемо может упасть где-то в середине
+   (`agent_install`/`platform_install`) с `UNREACHABLE`. Это нормально, не
+   повод паниковать — `base_hardening`/`docker_install` уже применились.
+2. Повторный прогон с `-e ansible_user={{ provision_user }}` (по умолчанию
+   `deploy`) докатывает оставшееся — все более ранние задачи идемпотентны и
+   просто отрепортят `ok`.
+
+### ⚠️ Fail2ban может забанить ВАС САМИХ во время этого двухфазного bootstrap'а
+
+`base_hardening` включает `fail2ban` (sshd jail, `maxretry: 3` за
+`findtime: 10m`, `bantime: 1h` — см. `defaults/main.yml`) **в том же самом
+первом прогоне**, в котором ещё происходит сам bootstrap. Если после
+`UNREACHABLE` из предыдущего пункта вы (или скрипт/агент) начинаете
+диагностировать проблему несколькими ручными `ssh root@...`/`ssh deploy@...`
+подряд (каждый получает `Permission denied`, потому что причина вовсе не в
+угаданном пользователе, а в отключённом root/несинхронизированном ключе) —
+это тоже засчитывается sshd-jail'ом как неудачные попытки, и через 3 подряд
+IP оператора (или CI-раннера) банится на этой конкретной ноде на час.
+Симптом бана — не `Permission denied`, а `kex_exchange_identification:
+Connection closed by remote host` (соединение обрывается ДО стадии
+аутентификации, ufw/iptables дропает пакеты). Подтверждено на практике этой
+сессией (VDS-A). **Практический вывод**: если `UNREACHABLE`/`Permission
+denied` — не тратьте попытки на ручную диагностику подряд, сразу проверьте
+гипотезу №1 (сменился `ansible_user`) через ОДИН прогон; если и это не
+помогло — остановитесь и подождите `fail2ban_bantime` (по умолчанию 1 час),
+а не продолжайте пробовать разные варианты пользователя/ключа — каждая
+попытка приближает к бану, а не отдаляет от него.
 
 ## Роль-специфичные firewall-порты (ТЗ-7 §3.2/§4.2)
 
@@ -461,6 +574,296 @@ plumbing"), и потому что точный путь, который Agent �
 volume под путь персиста Agent'а, как только код Agent'а из этого раунда
 будет смержен и станет видно, что именно и куда он пишет.
 
+## Control-plane через REALITY, зачем
+
+Найдено при реальном деплое, не спроектировано заранее: entry-нода в РФ
+(VDS-RU) не могла удержать соединение с control-plane Platform (50051/50052)
+несмотря на то, что и mTLS, и firewall-правила были корректны. Диагностика —
+`tcpdump` на Platform-ноде во время реального `curl`/`openssl s_client` с
+российской entry-ноды — показала: TCP-хендшейк (SYN/SYN-ACK/ACK) проходит
+идеально каждый раз, но ни один байт TLS ClientHello ни разу не долетел до
+Platform ни на одной попытке (443 и 50052 дважды). Это классическая сигнатура
+активного DPI (ТСПУ): хендшейк пропускают, режут именно первый пакет с
+данными, где виден SNI/сертификат — self-signed сертификат control-plane
+канала к тому же сам по себе похож на паттерн, по которому такое фильтруют.
+
+Обычный домен + Let's Encrypt здесь ненадёжен: по состоянию на середину 2026
+ТСПУ частично перешёл на поведенческий fingerprinting, а не только проверку
+SNI/сертификата, так что "просто настоящий сертификат" не гарантирует
+проход. Вместо этого control-plane трафик entry-нод в РФ заворачивается в тот
+же VLESS+REALITY, что уже доказанно работает для пользовательского
+data-plane (`platform/src/dist_vpn_platform/services/xray_templates.py`,
+`security/reality_keys.py`) — REALITY делает настоящий TLS-хендшейк с
+настоящим сторонним сайтом (донор из `platform_control_gateway_donor`/
+`agent_control_plane_tunnel_donor`, по умолчанию `img.yandex.ru`), так что
+для DPI это неотличимо от обычного HTTPS к этому сайту.
+
+**Голого REALITY оказалось недостаточно.** Даже с настоящим хендшейком к
+реальному донору TCP-хендшейк проходил, но ClientHello всё равно не доходил
+до Platform — тот же симптом, что и без REALITY вообще. Решение нашлось
+только с фрагментацией: `freedom`-outbound с `settings.fragment` (`packets:
+"tlshello"`, `length: "2-10"`, `interval: "10-20"`), подключённый к основному
+VLESS+REALITY outbound'у через `streamSettings.sockopt.dialerProxy` —
+официальный, задокументированный Xray-паттерн именно для этого случая
+(<https://xtls.github.io/en/config/outbounds/freedom.html>,
+<https://xtls.github.io/en/config/transports/sockopt.html>). Раздробленный на
+мелкие TCP-фрагменты ClientHello доходит и разбирается control-gateway'ем без
+ошибок — подтверждено `tcpdump`-захватом на живом VDS-A (фрагменты видны как
+несколько мелких PSH-пакетов вместо одного) и логами Xray
+(`dialing to tcp:127.0.0.1:50051` → `connection opened`, т.е. реально
+доходит до gRPC-порта Platform).
+
+### Архитектура
+
+- **Platform-нода** (`roles/platform_install/tasks/control_gateway.yml`):
+  статический (не управляемый через gRPC AddInbound — он и есть тот канал,
+  который защищает) Xray-инстанс, REALITY-inbound на публичном 443. Routing
+  ограничивает авторизованного клиента ТОЛЬКО адресами
+  `127.0.0.1:50051`/`127.0.0.1:50052` (свои же gRPC-порты Platform) — не
+  открытый прокси наружу.
+- **Entry-нода** (`roles/agent_install/tasks/control_plane_tunnel.yml`):
+  сайдкар-контейнер с двумя `dokodemo-door` inbound'ами на loopback
+  (15051/15052) + один VLESS+REALITY outbound (с `fragment`-цепочкой через
+  `dialerProxy`) до control-gateway'я.
+  `network_mode: "container:{{ agent_container_name }}"` — сайдкар делит
+  сетевой неймспейс с самим Agent'ом (не файловую систему), так что
+  `127.0.0.1:15051` реально видим из Agent'а как его собственный loopback.
+  `AGENT_PLATFORM_ADDRESS` автоматически переопределяется на
+  `127.0.0.1:15051` в `tasks/run.yml`, когда туннель включён — Agent-код
+  не менялся вообще, используется уже существующая конвенция
+  `resolved_platform_enrollment_address` (port+1 для enrollment-порта).
+
+Официальная документация полей: <https://xtls.github.io/en/config/transports/reality.html>
+(REALITY) и <https://xtls.github.io/en/config/inbounds/dokodemo.html> (dokodemo-door).
+
+### Ещё одна найденная гоча: non-root образ Xray-core на привилегированном порту
+
+Официальный образ `ghcr.io/xtls/xray-core` — distroless, работает под UID 65532
+(не root, без shell). Два независимых следствия, оба закрыты в
+`control_gateway.yml`/`control_plane_tunnel.yml`:
+1. Конфиг-файл на хосте должен быть `chown`'нут на этот UID (bind-mount не
+   транслирует владельца между хостом и контейнером) — иначе
+   `open /etc/xray/config.json: permission denied` в цикле рестартов.
+2. Bind на порт 443 (control-gateway) падает `permission denied` под non-root
+   UID даже с `network_mode: host`. Точечная `docker_container: capabilities:
+   [NET_BIND_SERVICE]` не сработала сама по себе на живом тесте (не выяснено
+   до конца, почему) — рабочий фикс — `ansible.posix.sysctl`:
+   `net.ipv4.ip_unprivileged_port_start` (персистентно, через
+   `/etc/sysctl.d/`), стандартный приём для non-root Xray/nginx на 443.
+
+### Включение
+
+Оба флага — явный opt-in (`false` по умолчанию), тот же принцип, что и
+`agent_insecure_dev_mode`:
+
+```
+platform_control_gateway_enabled: true       # на Platform-ноде
+agent_control_plane_tunnel_enabled: true     # на КОНКРЕТНОЙ entry-ноде в РФ
+```
+
+Ключи — один общий комплект на весь control-gateway (см. честную оговорку в
+`roles/platform_install/defaults/main.yml`, `platform_control_gateway_client_uuid`),
+генерируются один раз тем же кодом, что и REALITY-ключи пользовательских
+каскадов Platform:
+
+```bash
+cd platform && python3 -c "
+import sys; sys.path.insert(0, 'src')
+from dist_vpn_platform.security.reality_keys import generate_reality_keypair, generate_short_id
+priv, pub = generate_reality_keypair()
+print(f'private={priv}\npublic={pub}\nshort_id={generate_short_id()}')"
+python3 -c "import uuid; print(uuid.uuid4())"
+```
+
+Приватный ключ → `vault_control_gateway_reality_private_key` (только Platform),
+публичный ключ/shortId/uuid → те же значения на entry-ноде как
+`vault_control_gateway_reality_public_key`/`vault_control_gateway_reality_short_id`/
+`vault_control_gateway_client_uuid` — см. `group_vars/all/vault.yml.example`.
+
+### Побочный эффект: Caddy уходит на loopback
+
+`platform_control_gateway_enabled: true` забирает у Caddy публичный 443 (REALITY
+должен слушать именно его — нестандартный порт сам по себе сигнал для
+поведенческого DPI). Caddy переключается на
+`127.0.0.1:{{ platform_caddy_bind_port }}` (по умолчанию 8443) — доступ к Admin
+Client/REST API снаружи только через SSH-port-forward оператора:
+
+```bash
+ssh -L 8443:127.0.0.1:8443 <алиас Platform-хоста>
+# затем https://localhost:8443 в браузере, пока сессия открыта
+```
+
+Осознанное дополнительное ужесточение, не только следствие занятого порта:
+без домена ACME (порт 80) и так не используется (`tls internal`), так что
+публичная экспозиция Caddy раньше давала только доступ к самой админке — а
+она и так чувствительный компонент (полный контроль над флотом).
+
+### ⚠️ Открытая проблема: устойчивый TLS-in-TLS поток из РФ
+
+**Статус на конец этой сессии: найден и исправлен реальный баг конфигурации
+(рассинхрон `flow` между клиентом и gateway'ем — см. ниже), исправление
+формализовано в шаблонах и подтверждено байт-в-байт идентичным рендерингом
+через Jinja2. Но после фикса enrollment с реальной entry-ноды в РФ (VDS-RU)
+ВСЁ РАВНО не проходит стабильно — глубинная причина не в коде, а в активном
+вмешательстве ТСПУ в уже установленное REALITY-соединение, не только на этапе
+ClientHello.** Задокументировано подробно, чтобы не потерялось — следующая
+сессия должна начать отсюда, а не переоткрывать то же самое заново.
+
+**Найденный и исправленный баг (реальный, не гипотеза):** ошибка
+`"account ... is rejected since the client flow is empty"`, которую эта сессия
+долго пыталась лечить через XTLS Vision, оказалась **рассинхроном значения
+`flow` между `control-plane-tunnel-config.json.j2` (клиент) и
+`control-gateway-config.json.j2` (gateway)** — оба файла в git ВСЕГДА были
+`flow: ""` (согласованы), но живые конфиги на хостах разъехались в ходе ручной
+отладки предыдущих сессий (на gateway'е вручную выставлялся то `""`, то
+`"xtls-rprx-vision"`, без синхронной правки клиента). Решающий тест: на VDS-B
+(нет цензуры) byte-identical конфиг с `dialerProxy`+`fragment`+
+`flow: "xtls-rprx-vision"` на ОБЕИХ синхронных сторонах отработал чисто
+(`firstLen=1184`, `CopyRawConn splice`) — то есть Vision+dialerProxy+
+dokodemo-door НЕ конфликтуют технически, вопреки более ранней гипотезе этой же
+сессии (см. ниже, "что оказалось неверным"). Когда на VDS-RU обе стороны
+синхронизировали на `flow: ""` — VLESS-уровень тоже стабильно принимал
+enrollment-трафик (`firstLen=276`, `accepted ... taking detour
+to-platform-loopback`). **Vision не нужен — синхронный `flow: ""` на обеих
+сторонах и есть верная продовая конфигурация**, что и закреплено в шаблонах
+сейчас. Живые конфиги на VDS-A и VDS-RU передеплоены точным рендерингом
+шаблонов (Jinja2, все переменные — из `defaults/main.yml` и vault), чтобы
+устранить любой будущий дрейф между git и хостом.
+
+**Что оказалось неверным в более ранних версиях этого раздела (для истории,
+чтобы не повторить тот же тупик):** гипотеза "`dialerProxy` не форвардит
+Vision-маркеры" и "`dokodemo-door` не даёт Vision сырой сокет" — обе
+опровергнуты A/B-тестом на VDS-B (Vision+dialerProxy+dokodemo-door работает
+чисто без цензуры). Двухступенчатая SOCKS-релейная архитектура (dokodemo-door →
+SOCKS → VLESS+Vision), собранная как попытка обойти "проблему dokodemo-door",
+тоже не помогла — и не могла, т.к. проблема была не архитектурной, а в
+рассинхроне `flow` между хостами. Урок: при живой ручной правке конфигов на
+хостах в ходе отладки — ВСЕГДА проверять оба конца туннеля синхронно, не
+только тот, что редактируешь.
+
+**Факты, подтверждённые тестами, о том, что остаётся нерешённым (не теория):**
+
+1. Без фрагментации ClientHello REALITY-хендшейк не проходит вообще — `tcpdump`
+   на Platform-ноде показывал полный TCP SYN/SYN-ACK/ACK, но ноль байт TLS
+   ClientHello. Фрагментация (`freedom`-outbound + `sockopt.dialerProxy`,
+   `packets: "tlshello"`) решает именно эту часть — подтверждено многократно.
+2. **A/B-тест, решающий факт:** тот же самый туннель (identical код, конфиг,
+   образ), включённый на VDS-B (НЕ в РФ, цензуры нет), проходит enrollment
+   ПОЛНОСТЬЮ и чисто (`enrollment accepted`, нода становится `healthy`).
+   Значит архитектура сама по себе рабочая — проблема специфична для
+   российского сетевого пути, не общий баг кода.
+3. **Байт-точное доказательство (три независимых попытки соединения, `tcpdump`
+   на интерфейсе `ens3`, абсолютные seq-номера):** во всех трёх случаях ВСЕ
+   TCP-сегменты ClientHello ACK'аются сервером за <20мс, КРОМЕ самого последнего
+   — того, что дописывает объявленную в заголовке TLS-записи длину до конца
+   (наблюдалось на смещениях 1670:1811, 1766:1844, 1473:1743, 1779:1812 —
+   размер и позиция последнего сегмента каждый раз разные, но это ВСЕГДА
+   последний по порядку кусок). Финальный сегмент ретранслируется клиентом с
+   классическим TCP exponential backoff (6–8 попыток, интервалы 0.28с → 8с) и
+   НИКОГДА не подтверждается. Не зависит от длины фрагментации Xray (`100-200`,
+   `2-10`, ~`300-400`) — значит цензор считает байты от начала TLS-записи (длина
+   записи — поле протокола, видимое уже в первом фрагменте, не зависит от
+   TCP-сегментации) и глушит ИМЕННО тот сегмент, который завершил бы запись
+   заявленной длины. Это не проблема тюнинга фрагментации на уровне Xray в
+   принципе — Xray's `fragment` работает только на уровне TCP-сегментации и не
+   может обмануть счётчик байт на уровне TLS-записи.
+4. **После фикса рассинхрона `flow`:** отдельные попытки ВСЁ РАВНО иногда
+   проходят весь VLESS/REALITY-уровень (`accepted ... taking detour
+   to-platform-loopback` на порту 50052, дважды подтверждено в финальном тесте
+   этой сессии) — то есть ClientHello-уровень не блокируется на 100%,
+   вероятностно проходит. Но даже когда TCP/VLESS-диспетчеризация успешна,
+   реальный mTLS-handshake Agent↔Platform ВСЁ РАВНО не завершается — Agent
+   получает `Handshake read failed (Endpoint closing)` через ровно ~20 секунд
+   (таймаут gRPC) в 100% попыток за последние 5+ циклов ретрая подряд. Значит
+   ТСПУ вмешивается не только в ClientHello, но и в уже установленное
+   REALITY-соединение — глушит или искажает данные ПОСЛЕ успешного хендшейка,
+   ещё до завершения внутреннего (настоящего) mTLS-обмена Agent↔Platform.
+
+**Эксперимент с `zapret`/`nfqws` (проверено в этой сессии, результат отрицательный,
+но информативный):** раз проблема — в стейтфул-реассемблинге, а не в конфиге Xray,
+опробован специализированный анти-DPI инструмент `zapret` (github.com/bol-van/zapret),
+именно он таргетирует такой класс цензуры на уровне ядра через `NFQUEUE`.
+
+- Собран `nfqws` из исходников на VDS-RU (сборка прошла чисто после установки
+  `libnetfilter-queue-dev`, `libmnl-dev`, `zlib1g-dev`, `libcap-dev`).
+  **Важный гочтя инфраструктуры:** правило `iptables -t mangle` нужно вешать на
+  `POSTROUTING`, НЕ на `OUTPUT` — трафик туннель-контейнера идёт как forwarded/NAT'd
+  через `docker0` (`network_mode: container:dist-vpn-agent`), а не как локально
+  сгенерированный процесс хоста, поэтому `OUTPUT`-правило матчит 0 пакетов.
+  Официальный пример `zapret` использует `POSTROUTING` — с первого раза это было
+  упущено. Второй гочтя: фоновый `nfqws`, запущенный через `nohup ... & disown`
+  по SSH, надёжно убивался при закрытии SSH-сессии (похоже, `systemd-logind`
+  чистит cgroup пользователя независимо от `nohup`) — решение: `systemd-run
+  --unit=... --collect nfqws ...` (transient systemd-юнит, переживает закрытие
+  сессии).
+- `--dpi-desync-any-protocol=1` вместе с фрагментацией Xray (`dialerProxy`+`fragment`)
+  ломает TLS-парсер `nfqws` (двойная фрагментация — Xray режет поток ДО того, как
+  `nfqws` его увидит, парсер не может собрать валидный ClientHello для анализа) —
+  фрагментацию Xray пришлось ОТКЛЮЧИТЬ (убрать `dialerProxy`/`fragment-out` из
+  `to-control-gateway`, отдать всю работу по обходу цензуры `nfqws`) для честного
+  теста.
+- `--dpi-desync=multidisorder --dpi-desync-split-pos=sniext+1` — РЕАЛЬНО работает
+  (подтверждено `--debug=1` логом: корректно детектит полный TLS ClientHello,
+  честно переупорядочивает сегменты на проводе — поздний диапазон отправляется
+  ПЕРЕД более ранним). Результат: точка обрыва СМЕСТИЛАСЬ (теперь роняется не
+  последний, а "средний" — по новому порядку отправки — сегмент), но обрыв
+  ОСТАЛСЯ. Цензор пережил простое переупорядочивание — согласно самой
+  документации `zapret`, это ожидаемо для "более строгого фильтра", который
+  сам умеет корректно реассемблировать TCP-поток с учётом переупорядочивания
+  (`README.md` `zapret`: "на некоторых диапазонах IP используется более строгий
+  фильтр, распознающий попытки обмана через сегментацию").
+- Эскалация до `--dpi-desync=fake,multidisorder --dpi-desync-autottl=1
+  --dpi-desync-fooling=badseq` — **сделала ХУЖЕ**, не лучше: в этой конфигурации
+  НИЧЕГО не подтверждается сервером (даже первый, самый ранний сегмент,
+  который раньше всегда ACK'ался мгновенно) — цензор, похоже, распознаёт саму
+  попытку инъекции фейковых/некорректных пакетов как аномалию и усиливает
+  блокировку, а не обманывается ей.
+- **Вывод:** ТСПУ на этом конкретном сетевом пути (VDS-RU) — не наивный
+  first-packet-inspection DPI, а стейтфул реассемблер с устойчивостью к базовым
+  TCP-трюкам (переупорядочивание, TTL-фейки, bad seq/ack). `zapret`/`nfqws` сам
+  по себе — рабочий, корректно собранный и корректно интегрированный инструмент
+  (это доказано), но требует намного более тонкого, итеративного подбора
+  стратегии, чем удалось сделать за одну сессию — сама документация `zapret`
+  прямо говорит, что готовых пресетов под конкретные российские ISP/диапазоны
+  не существует, только эмпирика. **VDS-RU после теста возвращён к чистому,
+  задокументированному baseline** (фрагментация Xray восстановлена, `nfqws` и
+  iptables-правило удалены, `--queue-bypass` гарантировал отсутствие деградации
+  трафика на всём протяжении эксперимента).
+
+**Куда копать дальше (по убыванию вероятности успеха):**
+- Дальнейший, более терпеливый подбор стратегии `nfqws` — инфраструктура для
+  этого теперь есть и проверена (сборка, systemd-юнит, точечное POSTROUTING-
+  правило с `--queue-bypass`). Кандидаты, ещё не опробованные: `seqovl`
+  (перекрытие с уменьшенным seq вместо отдельных fake-пакетов — избегает
+  проблемы "цензор детектит сам факт инъекции", которая провалила `fake`-режим),
+  `ipfrag2` (фрагментация на уровне IP, не TCP — принципиально другой вектор),
+  комбинации `multisplit`+`seqovl` без `fake`. Каждая итерация — отдельный
+  цикл гипотеза→тест, не гарантирован успех (сам `zapret` описывает это как
+  эмпирику даже для community).
+- Раз проблема — в устойчивости УЖЕ установленного REALITY-соединения (не
+  ClientHello), а не в конфиге flow/Vision — рассмотреть `packets: "1-5"`
+  вместо `tlshello` в Xray fragment-outbound'е (фрагментировать первые N
+  пакетов, не только ClientHello) — не пробовалось.
+- Проверить `mux` (мультиплексирование) — Xray-документация: одна из находок
+  при поиске — `mux` тоже не всегда совместим с REALITY/TCP-транспортом
+  (github.com/XTLS/Xray-core/discussions/5481) — не проверялось.
+- Рассмотреть alternative donor/SNI для REALITY (не `img.yandex.ru`) — если
+  ТСПУ таргетирует конкретно этот донор по накопленной статистике, смена SNI
+  может временно снять эскалацию (не проверялось, дешёвый тест).
+- Связаться с сообществом/issue-трекером `zapret` напрямую с конкретным
+  воспроизводимым кейсом (стейтфул-реассемблер с устойчивостью к
+  multidisorder+fake/badseq) — за пределами типичных сценариев, документация
+  которых уже покрыта.
+
+**Текущее поведение в проде:** `agent_control_plane_tunnel_enabled: true` на
+entry-ноде в РФ разворачивает всю инфраструктуру корректно (сайдкар, роутинг,
+sysctl, и т.д.), конфиг теперь гарантированно синхронен с gateway'ем (баг
+рассинхрона исправлен), но Agent будет бесконечно ретраить enrollment с
+экспоненциальным backoff, не переходя в `healthy`, пока не решена глубинная
+проблема устойчивости REALITY-потока под активным ТСПУ. Это НЕ ломает остальной
+флот — VDS-A (Platform) и любые нероссийские entry/exit-ноды (VDS-B — живой
+пример) работают полностью штатно, с туннелем или без.
+
 ## Что реально проверено в этой песочнице
 
 Честно, без прикрас — то, что **не** было и не могло быть проверено
@@ -564,6 +967,53 @@ volume под путь персиста Agent'а, как только код Age
 идемпотентность и реальный `docker build`/`docker run` — не подтверждено
 запуском ни разу.** Это не должно применяться к реальной ноде без прогона
 на настоящей control-машине (с Docker daemon) сначала.
+
+### ⚠️ Обновление: `yamllint`/`ansible-lint` реально прогнаны впервые (GitHub Actions CI)
+
+Написанное выше про «`ansible-lint` не запускается в этой sandbox» по-прежнему
+верно **для Windows-песочницы разработки** — но `provisioning-lint` в
+`.github/workflows/ci.yml` гоняет оба линтера на настоящем `ubuntu-latest`, и
+это первый раз за всё время существования проекта, когда они реально
+выполнились против этого кода (`.ansible-lint`/`.yamllint` были написаны
+заранее, "на бумаге", без возможности проверить). Найдено и исправлено:
+
+- **`yamllint .` линтил и `provisioning/collections/`** — каталог, куда
+  `ansible-galaxy collection install -r requirements.yml` (по
+  `ansible.cfg`'s `collections_path`) кладёт сторонние коллекции
+  (`ansible.posix` и т.д.). Уже в `.gitignore`, но раньше никто не гонял
+  `yamllint .` целиком, чтобы это заметить. `.yamllint` теперь переиспользует
+  `.gitignore` (`ignore-from-file: [.gitignore]`) — исключения остаются в
+  одном месте, не дублируются.
+- 7 настоящих находок `yamllint` (`comments: too few spaces before comment`,
+  дефолтное правило требует 2 пробела перед инлайн `#`) — поправлены в
+  `roles/agent_install/defaults/main.yml`, `roles/agent_install/tasks/run.yml`,
+  `roles/base_hardening/defaults/main.yml`, `roles/base_hardening/handlers/main.yml`.
+- `.yamllint` дополнен пятью значениями, которые требует собственный
+  yaml-профиль `ansible-lint` (`comments.min-spaces-from-content`,
+  `comments-indentation`, `braces.max-spaces-inside`,
+  `octal-values.forbid-implicit-octal`/`forbid-explicit-octal`) — без них
+  `ansible-lint` предупреждал о "incompatible custom yamllint configuration"
+  и отключал fix-mode.
+- `schema[meta]`: во все три `meta/main.yml` (`agent_install`, `base_hardening`,
+  `docker_install`) добавлено обязательное поле `galaxy_info.author`.
+- `name[casing]`/`name[template]`: 2 имени задач с маленькой буквы
+  (`base_hardening/tasks/main.yml`) и 3 с Jinja-подстановкой в середине
+  строки (а не в конце, как требует `ansible-lint`) переформулированы —
+  смысл не менялся, только порядок слов.
+- **`var-naming[no-role-prefix]` (54 находки) — сознательно оставлено
+  невыполненным**, через `skip_list` в `.ansible-lint`, а не переименованием
+  всех переменных ролей. Причина зафиксирована прямо в файле: конвенция
+  существует, чтобы переменные разных ролей не конфликтовали при композиции
+  с чужими/сторонними ролями — у нас все три роли свои (`dependencies: []`
+  везде), коллизия физически невозможна. Проверено по официальной
+  документации ansible-lint: `var-naming` — правило уровня `basic` (входит
+  и в `moderate`/`safety`/`shared`/`production`), так что понижение профиля
+  не помогло бы избежать именно этого правила, зато выкинуло бы реальные
+  security-проверки уровня `safety` (`risky-file-permissions`,
+  `risky-shell-pipe` и т.д.) — `skip_list` конкретного правила остаётся
+  единственным точечным решением, и это официально задокументированный,
+  предусмотренный механизм (`docs.ansible.com/projects/lint/configuring`),
+  не обход.
 
 ## Scope of this slice / TODO
 

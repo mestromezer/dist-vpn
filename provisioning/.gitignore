@@ -11,6 +11,10 @@ group_vars/all/vault.yml
 inventory/*.ini
 !inventory/example.ini
 
+# Per-host оверрайды для реальных нод пула (host_vars/<inventory_hostname>.yml) —
+# тот же принцип: реальная топология конкретного оператора, не общий код роли.
+inventory/host_vars/
+
 # Локальный файл с паролем от Vault, если оператор решит хранить его файлом
 # рядом (альтернатива уже покрытым в корне vault_pass.txt/*.vault-password).
 .vault_pass

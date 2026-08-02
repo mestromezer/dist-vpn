@@ -216,9 +216,21 @@ async def dispatch_test(node_id: str, command: pb.Command, *, timeout: float = 3
 
 
 class AgentControlServicer(pb_grpc.AgentControlServicer):
+    def __init__(self, *, enrollment_only: bool = False) -> None:
+        """``enrollment_only`` distinguishes which of the two listeners
+        (grpc_server/server.py::build_server vs build_enrollment_server) this
+        instance is registered on - see that module's docstring for why there are two.
+        The strict listener never sets this (its transport layer already guarantees a
+        CA-verified client cert on every connection reaching here at all, so nothing
+        further to check); the enrollment listener sets it, and Session() below uses
+        it to refuse anything but Enrollment outright, regardless of what a peer might
+        claim - that listener never asks for a client cert, so there's nothing to
+        trust either way."""
+        self._enrollment_only = enrollment_only
+
     async def Session(self, request_iterator, context: grpc.aio.ServicerContext):
         peer = context.peer()
-        logger.info("grpc_session_opened", extra={"peer": peer})
+        logger.info("grpc_session_opened", extra={"peer": peer, "enrollment_only": self._enrollment_only})
 
         # Every PlatformMessage bound for this Agent (enrollment ack *and* dispatched
         # Commands) flows through this single queue, so there is exactly one place
@@ -230,6 +242,15 @@ class AgentControlServicer(pb_grpc.AgentControlServicer):
             try:
                 async for message in request_iterator:
                     kind = message.WhichOneof("payload")
+                    if self._enrollment_only and kind != "enrollment":
+                        # This listener never checks a client cert (see class
+                        # docstring) - refuse anything but Enrollment outright rather
+                        # than silently ignoring, so a legitimate Agent bug fails
+                        # loudly instead of hanging, and a stray probe gets nothing.
+                        logger.warning(
+                            "grpc_enrollment_listener_misuse", extra={"peer": peer, "kind": kind}
+                        )
+                        break
                     if kind == "enrollment":
                         ack = await self._handle_enrollment(message.enrollment, peer=peer)
                         if ack.accepted:

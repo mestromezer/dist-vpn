@@ -91,9 +91,9 @@ docker compose -f platform/docker-compose.yml up --build
 Поднимает Postgres + сам сервис. При старте контейнера `platform` автоматически (см. `docker-entrypoint.sh`):
 1. `alembic upgrade head`;
 2. сидирование дефолтного администратора (`python -m dist_vpn_platform.seed`) — **если** учётка `admin` уже существует, это no-op; если нет — создаётся со случайным одноразовым паролем, который печатается **один раз** в консоль контейнера (`docker compose logs platform`) и нигде больше не сохраняется (ТЗ-5 §6.3 — "небезопасная конфигурация по умолчанию");
-3. запуск HTTP (`:8000`) + gRPC (`:50051`) в одном процессе (`python -m dist_vpn_platform.main`).
+3. запуск HTTP (`:8000`) + gRPC строгий mTLS (`:50051`) + gRPC enrollment-only без клиентского сертификата (`:50052`, `grpc_server/server.py` — полное обоснование, почему это два порта, а не один опциональный) в одном процессе (`python -m dist_vpn_platform.main`).
 
-Порты хоста переопределяемы через `PLATFORM_HOST_HTTP_PORT` / `PLATFORM_HOST_GRPC_PORT` / `PLATFORM_HOST_DB_PORT`, если 8000/50051/5432 заняты чем-то ещё на машине.
+Порты хоста переопределяемы через `PLATFORM_HOST_HTTP_PORT` / `PLATFORM_HOST_GRPC_PORT` / `PLATFORM_HOST_GRPC_ENROLLMENT_PORT` / `PLATFORM_HOST_DB_PORT`, если 8000/50051/50052/5432 заняты чем-то ещё на машине.
 
 Проверено вручную (не только `docker compose build`, но и полный `up` + сквозной curl):
 - HTTP API поднимается, `/docs` отдаёт Swagger UI (200);
@@ -143,7 +143,7 @@ pytest -q
 | Переменная | Назначение | По умолчанию |
 |---|---|---|
 | `PLATFORM_DATABASE_URL` | Строка подключения к Postgres (asyncpg) | `postgresql+asyncpg://platform:platform@localhost:5432/platform` |
-| `PLATFORM_HTTP_PORT` / `PLATFORM_GRPC_PORT` | Порты REST- и gRPC-серверов | `8000` / `50051` |
+| `PLATFORM_HTTP_PORT` / `PLATFORM_GRPC_PORT` / `PLATFORM_GRPC_ENROLLMENT_PORT` | Порты REST-, строгого mTLS gRPC- и enrollment-only gRPC-серверов | `8000` / `50051` / `50052` |
 | `PLATFORM_JWT_SECRET_KEY` | Секрет подписи JWT — **обязательно переопределить** вне dev | случайный при каждом запуске процесса, если не задан |
 | `PLATFORM_JWT_ACCESS_TTL_MINUTES` | TTL access-токена (ТЗ-5 §6.3: 15–30 мин) | `20` |
 | `PLATFORM_JWT_REFRESH_TTL_DAYS` | TTL refresh-токена | `14` |

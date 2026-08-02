@@ -41,9 +41,19 @@ services:
       PLATFORM_MTLS_SERVER_SANS: ${PLATFORM_MTLS_SERVER_SANS:-localhost,127.0.0.1}
     ports:
       # Host ports are overridable (`PLATFORM_HOST_HTTP_PORT=8001 docker compose ...`)
-      # in case 8000/50051 are already taken on the host by something else.
+      # in case 8000/50051/50052 are already taken on the host by something else.
       - "${PLATFORM_HOST_HTTP_PORT:-8000}:8000"   # REST/WebSocket API for Admin Client
-      - "${PLATFORM_HOST_GRPC_PORT:-50051}:50051" # gRPC AgentControl for Agents
+      - "${PLATFORM_HOST_GRPC_PORT:-50051}:50051" # gRPC AgentControl (strict mTLS) for Agents
+      # Found while wiring provisioning/roles/platform_install/tasks/control_gateway.yml:
+      # this port was missing entirely - grpc_server/server.py has run two listeners
+      # (strict + enrollment-only, see that module's docstring) since the two-listener
+      # mTLS rework, but only the strict one was ever published to the host. A fresh
+      # `docker compose up` from this file alone would leave the enrollment listener
+      # reachable only inside the compose network, never from an Agent - enrollment
+      # would fail for every new node, not just Russian ones. The live VDS-A this
+      # session deployed against had this open via an ad-hoc manual fix that was never
+      # committed back here.
+      - "${PLATFORM_HOST_GRPC_ENROLLMENT_PORT:-50052}:50052" # gRPC enrollment-only for Agents
     volumes:
       # Persistent CA/server-cert storage (TZ-5 §6.2) - survives `docker compose down`
       # (without -v) and container recreation; the CA private key is generated once,

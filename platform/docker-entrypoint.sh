@@ -10,5 +10,5 @@ alembic upgrade head
 echo "Seeding default admin account (no-op if it already exists)..."
 python -m dist_vpn_platform.seed
 
-echo "Starting Platform (HTTP :${PLATFORM_HTTP_PORT:-8000} + gRPC :${PLATFORM_GRPC_PORT:-50051})..."
+echo "Starting Platform (HTTP :${PLATFORM_HTTP_PORT:-8000} + gRPC :${PLATFORM_GRPC_PORT:-50051} + gRPC enrollment :${PLATFORM_GRPC_ENROLLMENT_PORT:-50052})..."
 exec python -m dist_vpn_platform.main

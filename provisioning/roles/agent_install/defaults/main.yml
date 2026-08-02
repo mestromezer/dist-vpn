@@ -16,7 +16,7 @@
 # собирает образ ЛОКАЛЬНО на целевом хосте из закреплённой версии
 # исходников, а не предполагает существование образа в ещё не существующем
 # реестре.
-agent_image_source: build_from_source # build_from_source | registry
+agent_image_source: build_from_source  # build_from_source | registry
 
 # --- build_from_source: клонирование репозитория на целевой хост ---
 # Пусто по умолчанию = явная ошибка в preflight, а не молчаливая сборка
@@ -26,6 +26,22 @@ agent_source_git_repo: ""
 agent_source_git_ref: ""
 agent_source_checkout_dir: /opt/dist-vpn/agent-src
 agent_image_tag: dist-vpn-agent:local
+
+# Персональный токен GitHub (fine-grained, read-only, scoped ТОЛЬКО на этот
+# репозиторий) — нужен, только если agent_source_git_repo указывает на приватный
+# репозиторий. Пусто по умолчанию = клонирование без аутентификации (публичный
+# репозиторий, либо на целевом хосте уже настроен свой git credential helper —
+# маловероятно для одноразовой VDS, но не исключено). Общий с platform_install
+# (тот же репозиторий с исходниками) — см. group_vars/all/vault.yml.example.
+agent_source_github_pat: "{{ vault_github_pat | default('') }}"
+
+# Собранный на лету authenticated URL — используется ТОЛЬКО в задаче клонирования
+# (tasks/image.yml, no_log: true на этой задаче). Diagnostic-сообщения по-прежнему
+# используют agent_source_git_repo как есть (без токена) — токен никогда не должен
+# попасть в вывод Ansible.
+agent_source_git_repo_authenticated: >-
+  {{ agent_source_git_repo | regex_replace('^https://', 'https://' ~ agent_source_github_pat ~ '@')
+     if (agent_source_github_pat | length > 0) else agent_source_git_repo }}
 
 # --- registry: используется только если agent_image_source: registry ---
 # Пусто по умолчанию намеренно — этот путь пока нигде в проекте не
@@ -56,7 +72,7 @@ agent_docker_proxy_network: dist-vpn-docker-proxy-net
 # group_vars/all/vault.yml.example), эта роль лишь читает их под теми же
 # именами, под которыми они уже задокументированы там (см.
 # tasks/preflight.yml за проверкой, что они реально заданы).
-agent_requested_role: "{{ role }}" # entry|exit -- см. AGENT_REQUESTED_ROLE / NodeRole в контракте
+agent_requested_role: "{{ role }}"  # entry|exit -- см. AGENT_REQUESTED_ROLE / NodeRole в контракте
 agent_heartbeat_interval_seconds: 15
 agent_log_level: INFO
 
@@ -115,3 +131,102 @@ agent_mtls_client_key_dest: /etc/dist-vpn-agent/tls/client-key.pem
 # явным осознанным решением оператора (group_vars/host_vars для конкретной
 # dev/тестовой ноды), а не default этой роли.
 agent_insecure_dev_mode: false
+
+# --- Host-путь конфига Xray (найдено при реальном two-VDS деплое: этот путь
+# отсутствовал в run.yml полностью) --- agent/src/dist_vpn_agent/config.py
+# (xray_config_host_path, default /etc/dist-vpn/xray-config.json) -- это ХОСТ-путь,
+# который Agent сам пишет и затем передаёт docker_manager.py как bind-mount source
+# при создании соседнего Xray-контейнера через docker-socket-proxy. Раньше эта роль
+# никогда не монтировала этот путь В КОНТЕЙНЕР САМОГО Agent'а -- Agent пытался
+# писать файл только внутри своей эфемерной контейнерной ФС, в каталог /etc,
+# владелец root, процесс -- непривилегированный agent: PermissionError при каждом
+# старте. Фикс -- bind-mount ОДНОГО И ТОГО ЖЕ пути по обе стороны (хост и
+# контейнер), чтобы запись Agent'а физически оказалась на хосте по пути, который
+# затем реально существует для docker-демона хоста, когда Agent просит его
+# смонтировать этот путь в НОВЫЙ (Xray) контейнер.
+agent_xray_config_host_dir: /etc/dist-vpn
+agent_xray_config_host_path: "{{ agent_xray_config_host_dir }}/xray-config.json"
+
+# UID/GID пользователя `agent`, зашитого в agent/Dockerfile (useradd --system --
+# первый системный пользователь в свежем Debian-based образе стабильно получает
+# 999, но это следствие конкретного Dockerfile/базового образа, не гарантия
+# платформы) -- bind-mount не транслирует UID/GID между хостом и контейнером
+# (тот же класс компромисса, что уже задокументирован для клиентского mTLS-ключа
+# ниже), так что хостовый каталог должен быть заранее chown'нут на этот UID,
+# иначе непривилегированный процесс agent внутри контейнера не сможет в него
+# писать. Проверено фактическим `docker run --rm --entrypoint id
+# dist-vpn-agent:local` на реальной сборке этой роли.
+agent_container_uid: 999
+agent_container_gid: 999
+
+# --- Control-plane REALITY sidecar (roles/agent_install/tasks/control_plane_tunnel.yml) ---
+# Найдено фактическим tcpdump-диагностированием этой сессии (см.
+# provisioning/README.md, "Control-plane через REALITY, зачем"): ТСПУ пропускает
+# TCP-хендшейк к 50051/50052, но режет первый пакет с данными (TLS ClientHello) —
+# на entry-нодах в РФ прямое соединение Agent'а с Platform не держится. Заворачиваем
+# его в тот же VLESS+REALITY, что уже доказанно проходит для пользовательского
+# data-plane (platform/src/dist_vpn_platform/services/xray_templates.py).
+#
+# false по умолчанию — тот же принцип явного opt-in, что agent_insecure_dev_mode:
+# включать только на нодах, которые реально в зоне действия такой фильтрации
+# (сейчас — РФ), не везде по умолчанию.
+agent_control_plane_tunnel_enabled: false
+
+agent_control_plane_tunnel_image: "ghcr.io/xtls/xray-core:latest"  # см. platform_control_gateway_image за обоснованием выбора образа
+agent_control_plane_tunnel_container_name: dist-vpn-control-tunnel
+
+# Тот же UID/GID, тем же способом найденный (docker inspect живого контейнера на
+# VDS-A) — см. platform_control_gateway_container_uid за полным обоснованием.
+agent_control_plane_tunnel_container_uid: 65532
+agent_control_plane_tunnel_container_gid: 65532
+
+# Публичный адрес/IP control-gateway'я (Platform-нода) и REALITY-идентичность,
+# которую он ожидает — публичный ключ/shortId/uuid ДОЛЖНЫ совпадать с тем, что
+# сгенерировано на стороне platform_install (platform_control_gateway_private_key
+# и т.д. — приватный ключ туда, публичный сюда, см. тот defaults/main.yml).
+#
+# Выведен из agent_platform_address (уже задан в vault.yml — тот же хост, на
+# который entry-нода и так слала бы прямой gRPC-трафик, control-gateway просто
+# слушает другой порт на нём же), а не заведён отдельной переменной — избегает и
+# дублирования, и вопроса "где хранить публичный IP, чтобы не закоммитить его в
+# group_vars" (agent_platform_address уже решает это, живя в vault.yml, не в
+# committed group_vars). split(':')[0] — простое отделение host от host:port,
+# ДОЛЖЕН работать и для IPv4, и для hostname (agent_platform_address не ожидает
+# IPv6 без скобок нигде в проекте — тот же формат, что уже использует
+# resolved_platform_enrollment_address в agent/config.py). Переопределяемо, если
+# control-gateway когда-нибудь окажется на другом хосте, чем сама Platform.
+agent_control_plane_tunnel_gateway_address: "{{ agent_platform_address.split(':')[0] if (agent_platform_address | default('')) | length > 0 else '' }}"
+agent_control_plane_tunnel_public_key: "{{ vault_control_gateway_reality_public_key | default('') }}"
+agent_control_plane_tunnel_short_id: "{{ vault_control_gateway_reality_short_id | default('') }}"
+agent_control_plane_tunnel_client_uuid: "{{ vault_control_gateway_client_uuid | default('') }}"
+agent_control_plane_tunnel_donor: "img.yandex.ru"  # ДОЛЖЕН совпадать с platform_control_gateway_donor
+
+# ⚠️ [Эксперимент] ДОЛЖЕН совпадать буквально с platform_control_gateway_xhttp_path
+# (roles/platform_install/defaults/main.yml — см. комментарий там же за полным
+# обоснованием, почему XHTTP вместо raw TCP).
+agent_control_plane_tunnel_xhttp_path: "/api/v1/events"
+
+# Локальные loopback-порты, на которые Agent реально дозванивается (dokodemo-door
+# внутри туннеля превращает "подключение сюда" в "запрос до Platform на другом конце
+# REALITY-канала" — см. tasks/control_plane_tunnel.yml). +1 конвенция между строгим
+# и enrollment-портом сохранена намеренно: agent/src/dist_vpn_agent/config.py
+# (resolved_platform_enrollment_address) сама выведет 15052 из 15051, раз уже
+# существует для реальных host:port Platform — код Agent'а не пришлось менять
+# вообще, только AGENT_PLATFORM_ADDRESS (см. tasks/run.yml).
+agent_control_plane_tunnel_local_strict_port: 15051
+agent_control_plane_tunnel_local_enrollment_port: 15052
+
+# --- Фрагментация TLS ClientHello (freedom outbound + sockopt.dialerProxy, см.
+# tasks/control_plane_tunnel.yml/шаблон за официальными ссылками на документацию) ---
+# Найдено фактическим тестированием этой сессии: голый VLESS+REALITY (без
+# фрагментации) не проходил ТСПУ вообще — полный TCP-хендшейк, но ноль байт
+# ClientHello. Пользователь изначально давал "2-10" (рабочее значение на ДРУГОЙ,
+# уже проверенной боевой связке) — но по официальному Xray-core issue-трекеру
+# (github.com/XTLS/Xray-core, обсуждение фрагментации) минимальная длина для
+# packets: "tlshello" должна быть от 6, не от 2 — "2-10" технически ниже
+# рекомендованного минимума. "100-200" эмпирически показал больше успешно
+# переданных байт в тестах этой сессии (см. README за полным разбором,
+# "Открытая проблема: устойчивый TLS-in-TLS поток из РФ") — используется как
+# дефолт до дальнейшей проверки.
+agent_control_plane_tunnel_fragment_length: "100-200"
+agent_control_plane_tunnel_fragment_interval: "10-20"

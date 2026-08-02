@@ -1,0 +1,114 @@
+{#
+  Источник: roles/agent_install (defaults/main.yml: agent_control_plane_tunnel_*).
+  Не редактировать вручную на хосте — правки будут перезаписаны при следующем прогоне.
+
+  Официальная документация полей: https://xtls.github.io/en/config/transports/reality.html
+  (realitySettings, клиентская сторона: fingerprint/serverName/publicKey/shortId),
+  https://xtls.github.io/en/config/inbounds/dokodemo.html (dokodemo-door),
+  https://xtls.github.io/en/config/transports/xhttp.html (XHTTP).
+
+  ⚠️ [Эксперимент, см. README.md "Control-plane через REALITY"] network: "xhttp"
+  вместо "raw" + fragment/dialerProxy. Предыдущая сессия эмпирически доказала:
+  raw TCP + fragment/dialerProxy решает ТОЛЬКО фазу ClientHello — байт-точный
+  tcpdump-анализ показал, что ТСПУ на этом сетевом пути реассемблирует и
+  продолжает инспектировать УЖЕ установленный REALITY-поток целиком, не только
+  хендшейк (см. корпус независимых находок про TSPU inline-blocking — ссылка в
+  README). Один постоянный двунаправленный TCP-поток (raw) сам по себе — сигнал,
+  непохожий на HTTPS-браузинг, независимо от качества камуфляжа хендшейка. XHTTP
+  меняет саму ФОРМУ трафика (запрос/ответ вместо одного долгого потока,
+  разделение upload/download) — независимо рекомендовано и XTLS-документацией, и
+  community-обсуждением именно этого симптома (VLESS TLS handshake
+  blocking/degradation в РФ, начало 2026). fragment/dialerProxy сознательно
+  убраны из этой версии — изолируем переменную для чистого теста; если XHTTP
+  сам по себе не решит проблему, следующий шаг — не досадовать fragment обратно
+  вслепую, а вернуться к байт-точному tcpdump-анализу заново, уже под XHTTP.
+
+  flow: "" (Vision НЕ используется) — намеренно сохранено даже при смене
+  транспорта. См. README.md "Control-plane через REALITY, зачем": предыдущая
+  сессия эмпирически доказала, что "client flow is empty" был рассинхроном flow
+  между этим файлом и gateway'ем, а не технической несовместимостью. Держать flow
+  здесь и на gateway'е ВСЕГДА синхронными — тот же урок применяется к xhttpSettings.path
+  ниже: ДОЛЖЕН совпадать буквально с control-gateway-config.json.j2.
+
+  Два dokodemo-door inbound'а на loopback — Agent реально дозванивается сюда
+  (AGENT_PLATFORM_ADDRESS=127.0.0.1:{{ agent_control_plane_tunnel_local_strict_port }},
+  см. tasks/run.yml). dokodemo-door превращает "подключение на этот локальный порт" в
+  "запрос до address:port ниже", который routing отправляет в единственный outbound —
+  VLESS+REALITY до control-gateway'я на Platform. Контейнер запускается с
+  network_mode: "container:{{ agent_container_name }}" (см. tasks/control_plane_tunnel.yml),
+  так что "127.0.0.1" здесь и в Agent'е — буквально один и тот же loopback.
+#}
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "tunnel-in-strict",
+      "listen": "127.0.0.1",
+      "port": {{ agent_control_plane_tunnel_local_strict_port }},
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 50051,
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tunnel-in-enrollment",
+      "listen": "127.0.0.1",
+      "port": {{ agent_control_plane_tunnel_local_enrollment_port }},
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 50052,
+        "network": "tcp"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "to-control-gateway",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "{{ agent_control_plane_tunnel_gateway_address }}",
+            "port": 443,
+            "users": [
+              {
+                "id": "{{ agent_control_plane_tunnel_client_uuid }}",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "fingerprint": "chrome",
+          "serverName": "{{ agent_control_plane_tunnel_donor }}",
+          "publicKey": "{{ agent_control_plane_tunnel_public_key }}",
+          "shortId": "{{ agent_control_plane_tunnel_short_id }}"
+        },
+        "xhttpSettings": {
+          "path": "{{ agent_control_plane_tunnel_xhttp_path }}",
+          "host": "{{ agent_control_plane_tunnel_donor }}"
+        }
+      }
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["tunnel-in-strict", "tunnel-in-enrollment"],
+        "outboundTag": "to-control-gateway"
+      }
+    ]
+  }
+}

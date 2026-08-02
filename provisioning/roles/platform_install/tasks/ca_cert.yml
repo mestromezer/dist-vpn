@@ -1,0 +1,33 @@
+---
+# Забирает CA-сертификат Platform на машину оператора автоматически — раньше это
+# был отдельный ручной шаг (docker compose cp + scp, см. deploy.md) на каждую новую
+# инсталляцию Platform. Нужен на control-машине оператора для двух вещей: (1)
+# agent_mtls_ca_cert_src при провижининге entry/exit-нод (roles/agent_install), (2)
+# чтобы оператор мог сам импортировать его в браузер, если Caddy поднят без
+# platform_domain (см. Caddyfile.j2 — tls internal, самоподписанный).
+- name: Извлечь CA-сертификат из тома Platform во временный путь на целевом хосте
+  ansible.builtin.command:
+    cmd: >-
+      docker compose
+      -f {{ platform_source_checkout_dir }}/platform/docker-compose.yml
+      cp platform:/var/lib/dist-vpn-platform/ca/ca-cert.pem /tmp/dist-vpn-platform-ca-cert.pem
+  changed_when: true
+
+- name: Забрать CA-сертификат на машину оператора
+  ansible.builtin.fetch:
+    src: /tmp/dist-vpn-platform-ca-cert.pem
+    dest: "{{ platform_ca_cert_local_dest }}"
+    flat: true
+
+- name: Удалить временную копию CA-сертификата с целевого хоста
+  ansible.builtin.file:
+    path: /tmp/dist-vpn-platform-ca-cert.pem
+    state: absent
+
+- name: "Диагностика: CA-сертификат Platform забран на машину оператора"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] CA-сертификат Platform сохранён в
+      {{ platform_ca_cert_local_dest }} на машине оператора — передайте этот
+      путь как agent_mtls_ca_cert_src при провижининге entry/exit-нод
+      (roles/agent_install).

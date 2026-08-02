@@ -1,0 +1,116 @@
+{#
+  Источник: roles/platform_install (defaults/main.yml: platform_control_gateway_*).
+  Не редактировать вручную на хосте — правки будут перезаписаны при следующем прогоне.
+
+  Официальная документация полей: https://xtls.github.io/en/config/transports/reality.html
+  (realitySettings), https://xtls.github.io/en/config/protocols/vless.html (VLESS),
+  https://xtls.github.io/en/config/outbounds/vless.html (XTLS Vision flow) и
+  https://xtls.github.io/en/config/transports/xhttp.html (XHTTP).
+
+  ⚠️ [Эксперимент, см. README.md "Control-plane через REALITY"] network: "xhttp"
+  вместо "raw". Синхронно с control-plane-tunnel-config.json.j2 на Agent-стороне —
+  xhttpSettings.path ЗДЕСЬ ДОЛЖЕН совпадать буквально с тем файлом (используется
+  platform_control_gateway_xhttp_path / agent_control_plane_tunnel_xhttp_path,
+  одно и то же значение по умолчанию задано в обоих defaults/main.yml). Причина
+  смены транспорта — см. подробное обоснование в комментарии control-plane-tunnel-
+  config.json.j2 (кратко: байт-точный tcpdump предыдущей сессии показал, что ТСПУ
+  на этом маршруте инспектирует весь поток целиком, а не только ClientHello; один
+  долгий двунаправленный TCP-поток — сам по себе подозрительный паттерн; XHTTP
+  меняет форму трафика на запрос/ответ). fragment/dialerProxy тут никогда не было
+  (клиент — единственная сторона, инициирующая пакеты, значит единственная
+  сторона, где фрагментация ClientHello вообще имела смысл) — с XHTTP это верно
+  тем более: fragment - опция raw-транспорта, к xhttp не применяется.
+
+  flow: "" (Vision НЕ используется) — намеренно, не временная заглушка. См.
+  README.md "Control-plane через REALITY, зачем" за полным разбором расследования:
+  flow: "xtls-rprx-vision" был опробован как фикс для лога "pure TLS proxy has
+  certain TLS in TLS characters", но КАЖДЫЙ раз, когда сервер отвечал "client flow
+  is empty", причиной оказывался рассинхрон flow между этим файлом и клиентским
+  control-plane-tunnel-config.json.j2 (правился вручную на хосте в ходе отладки).
+  Решающий A/B-тест (VDS-B, без цензуры): байт-в-байт идентичный конфиг с
+  dialerProxy+fragment+Vision на ОБЕИХ синхронных сторонах отработал чисто. Когда
+  на VDS-RU оба файла синхронизировали на flow: "" — enrollment тоже стабильно
+  доходил до gateway (firstLen=276, "accepted... taking detour"). Устойчивый сбой,
+  который остаётся — это ЧИСТО ClientHello-уровня блокировка ТСПУ ("failed to read
+  client hello"), купируется фрагментацией (fragment/dialerProxy ниже) и носит
+  вероятностный/адаптивный характер, а не является следствием flow. Vision не
+  нужен — не включать без крайней необходимости: любой рассинхром с клиентом
+  ломает даже то, что сейчас работает.
+
+  Один VLESS+REALITY inbound на порту platform_control_gateway_port (443, тот же
+  порт, что раньше держал Caddy — см. Caddyfile.j2 за переносом Caddy на loopback).
+  routing ограничивает то, куда авторизованный клиент вообще может дотянуться —
+  ТОЛЬКО собственные gRPC-порты Platform на loopback, не открытый прокси наружу.
+#}
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "control-gateway-in",
+      "listen": "0.0.0.0",
+      "port": {{ platform_control_gateway_port }},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "{{ platform_control_gateway_client_uuid }}",
+            "flow": ""
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "{{ platform_control_gateway_donor }}:443",
+          "serverNames": [
+            "{{ platform_control_gateway_donor }}"
+          ],
+          "privateKey": "{{ platform_control_gateway_private_key }}",
+          "shortIds": [
+            "{{ platform_control_gateway_short_id }}"
+          ]
+        },
+        "xhttpSettings": {
+          "path": "{{ platform_control_gateway_xhttp_path }}"
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "to-platform-loopback",
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole",
+      "settings": {}
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["control-gateway-in"],
+        "ip": ["127.0.0.1"],
+        "port": "{{ platform_grpc_port }},{{ platform_grpc_enrollment_port }}",
+        "outboundTag": "to-platform-loopback"
+      },
+      {
+        "type": "field",
+        "inboundTag": ["control-gateway-in"],
+        "outboundTag": "block"
+      }
+    ]
+  }
+}

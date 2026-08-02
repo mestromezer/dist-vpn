@@ -45,6 +45,19 @@ def generate_test_csr_pem(common_name: str = "fake-agent") -> bytes:
 
 
 class FakeContext:
+    """Stands in for a real grpc.aio.ServicerContext - every test using this fake
+    drives enrollment-then-heartbeat/telemetry/etc. through the *logic* layer, not a
+    real TLS handshake (that's what tests/test_mtls_integration.py is for).
+
+    grpc_server/server.py now runs the servicer behind two separate listeners
+    (strict-mTLS vs enrollment-only, see that module's docstring) rather than
+    inspecting per-connection cert state, so AgentControlServicer itself takes an
+    `enrollment_only` constructor flag - this fake context needs no cert-related
+    surface at all any more (an earlier version of this comment described one; see
+    git history if curious why it didn't work out - grpc doesn't expose an *offered*
+    client cert to the application when client auth isn't required for a listener,
+    which was the whole problem)."""
+
     def peer(self) -> str:
         return "fake-peer"
 

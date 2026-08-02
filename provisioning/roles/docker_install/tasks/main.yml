@@ -7,6 +7,31 @@
       roles/docker_install поддерживает только Debian/Ubuntu (apt). Обнаружено:
       {{ ansible_facts['os_family'] }}.
 
+# Найдено при реальном деплое на VDS, ранее уже поднятую вручную по deploy.md (до
+# появления этой роли): deploy.md инструктировал ставить Docker из дистрибутивного
+# репозитория (`apt install docker.io docker-compose-plugin`), а не из официального
+# репозитория Docker — та же официальная рекомендация Docker "uninstall old/
+# conflicting versions before installing from the official repo"
+# (docs.docker.com/engine/install/ubuntu/#uninstall-old-versions), которую эта роль
+# раньше не выполняла, потому что до сих пор применялась только на свежих VDS без
+# такого прошлого. Симптом без этого шага — `dpkg: error processing archive ...:
+# trying to overwrite '/usr/libexec/docker/cli-plugins/docker-compose', which is
+# also in package docker-compose-v2` (пакет-конфликт по одному и тому же файлу
+# между официальным docker-compose-plugin и дистрибутивным docker-compose-v2).
+# `apt remove` (не purge) — данные/тома контейнеров, если что-то уже было
+# запущено под дистрибутивным Docker, не трогаются.
+- name: Убрать конфликтующие дистрибутивные пакеты Docker (если ставились раньше не через эту роль)
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-doc
+      - docker-compose
+      - docker-compose-v2
+      - podman-docker
+      - containerd
+      - runc
+    state: absent
+
 - name: Установить зависимости для добавления apt-репозитория по HTTPS
   ansible.builtin.apt:
     name:
@@ -60,7 +85,7 @@
 # (ничего дополнительно не открываем/не конфигурируем для tcp:// — ТЗ-7 §3.4:
 # "демон сокет не публикуется наружу без крайней необходимости").
 
-- name: "Добавить {{ provision_user }} в группу docker (без sudo для docker-команд)"
+- name: "Добавить в группу docker (без sudo для docker-команд): {{ provision_user }}"
   ansible.builtin.user:
     name: "{{ provision_user }}"
     groups: docker

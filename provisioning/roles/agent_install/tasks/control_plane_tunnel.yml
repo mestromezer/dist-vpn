@@ -1,0 +1,63 @@
+---
+# Control-plane REALITY sidecar — см. defaults/main.yml (agent_control_plane_tunnel_*)
+# за полным обоснованием. Выполняется только когда agent_control_plane_tunnel_enabled:
+# true (по умолчанию false). Должен запускаться ПОСЛЕ контейнера Agent'а (см.
+# tasks/main.yml) — network_mode: "container:{{ agent_container_name }}" ниже
+# требует, чтобы целевой контейнер уже существовал.
+
+## Preflight-проверка обязательных значений — см. tasks/preflight.yml (запускается
+## первой, до сборки образа/запуска Agent'а — не дублируется здесь).
+
+- name: Создать каталог конфига control-plane-туннеля
+  ansible.builtin.file:
+    path: /opt/dist-vpn-control-tunnel
+    state: directory
+    owner: "{{ agent_control_plane_tunnel_container_uid }}"
+    group: "{{ agent_control_plane_tunnel_container_gid }}"
+    mode: "0700"
+  when: agent_control_plane_tunnel_enabled | bool
+
+# owner/group = UID/GID образа (не root:root) — тот же класс гочи, что уже поймали
+# на control-gateway'е (см. defaults/main.yml agent_control_plane_tunnel_container_uid):
+# официальный distroless-образ Xray-core работает под non-root UID 65532,
+# bind-mount не транслирует владельца, root:root на хосте = permission denied
+# внутри контейнера.
+- name: Сгенерировать конфиг control-plane-туннеля (dokodemo-door + VLESS-REALITY outbound)
+  ansible.builtin.template:
+    src: control-plane-tunnel-config.json.j2
+    dest: /opt/dist-vpn-control-tunnel/config.json
+    owner: "{{ agent_control_plane_tunnel_container_uid }}"
+    group: "{{ agent_control_plane_tunnel_container_gid }}"
+    mode: "0600"
+  register: agent_control_plane_tunnel_config
+  no_log: true
+  when: agent_control_plane_tunnel_enabled | bool
+
+# network_mode: "container:{{ agent_container_name }}" — сайдкар делит СЕТЕВОЙ
+# неймспейс с контейнером Agent'а (не файловую систему/volumes — только сетевой
+# стек), поэтому dokodemo-door на "127.0.0.1:{{ agent_control_plane_tunnel_local_strict_port }}"
+# реально видим из самого Agent'а как его собственный loopback — без городить
+# отдельную Docker-сеть с DNS между двумя контейнерами (agent_container_networks
+# ниже включает "bridge" — ЛИТЕРАЛЬНО дефолтный мост Docker, а он не даёт
+# автоматического DNS между контейнерами, в отличие от пользовательских сетей типа
+# agent_docker_proxy_network выше — netns-шаринг сюда проще и надёжнее). Требует,
+# чтобы контейнер Agent'а уже существовал на момент запуска (см. порядок в
+# tasks/main.yml).
+- name: Запустить/пересоздать control-plane-туннель (официальный образ Xray-core)
+  community.docker.docker_container:
+    name: "{{ agent_control_plane_tunnel_container_name }}"
+    image: "{{ agent_control_plane_tunnel_image }}"
+    command: ["run", "-c", "/etc/xray/config.json"]
+    state: started
+    restart_policy: "{{ agent_restart_policy }}"
+    network_mode: "container:{{ agent_container_name }}"
+    recreate: "{{ agent_control_plane_tunnel_config.changed }}"
+    volumes:
+      - /opt/dist-vpn-control-tunnel/config.json:/etc/xray/config.json:ro
+  when: agent_control_plane_tunnel_enabled | bool
+
+- name: "Остановить control-plane-туннель, если выключен (agent_control_plane_tunnel_enabled: false)"
+  community.docker.docker_container:
+    name: "{{ agent_control_plane_tunnel_container_name }}"
+    state: absent
+  when: not (agent_control_plane_tunnel_enabled | bool)

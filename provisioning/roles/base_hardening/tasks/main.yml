@@ -22,7 +22,7 @@
       PasswordAuthentication={{ ssh_password_authentication }},
       MaxAuthTries={{ ssh_max_auth_tries }}.
 
-- name: ufw — firewall (ТЗ-7 §3.2)
+- name: Ufw — firewall (ТЗ-7 §3.2)
   ansible.builtin.import_tasks: firewall.yml
 
 - name: "Диагностика: firewall настроен"
@@ -37,7 +37,7 @@
       обоснованием (backhaul Hop B и control-plane mTLS-порт намеренно НЕ
       входят сюда, см. те же файлы за причиной).
 
-- name: fail2ban — дополнительный слой поверх ufw (ТЗ-7 §3.3)
+- name: Fail2ban — дополнительный слой поверх ufw (ТЗ-7 §3.3)
   ansible.builtin.import_tasks: fail2ban.yml
 
 - name: "Диагностика: fail2ban настроен"

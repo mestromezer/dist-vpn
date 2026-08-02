@@ -156,6 +156,19 @@ class ControlClient:
         override paths (which remain meant for identities provisioned
         entirely out-of-band, outside this CSR flow -- see identity.py
         module docstring point 3 and agent/README.md).
+
+        Without a persisted identity (and no operator-supplied override cert either -
+        the normal bootstrap case), this dials ``settings.resolved_platform_enrollment_address``
+        instead of ``platform_address`` -- see that field's docstring (config.py) for
+        why Platform now needs a *separate* port with no client-cert requirement at
+        all for Enrollment to be possible. Once persisted (or an override cert is
+        configured), every connection goes to the strict ``platform_address`` port.
+
+        ``insecure_dev_mode`` never does this split: it's a single-channel, no-TLS-at-
+        all dev/test escape hatch (a fake/local server on one address, nothing to be
+        strict *or* optional about) predating the two-port design, and every existing
+        test exercising it (tests/test_control_client.py) sets up exactly one server on
+        ``platform_address`` - so it always dials that address, unconditionally.
         """
         if self._settings.insecure_dev_mode:
             logger.warning(
@@ -165,6 +178,13 @@ class ControlClient:
                 self._settings.platform_address,
             )
             return grpc.aio.insecure_channel(self._settings.platform_address)
+
+        no_client_identity = persisted is None and not self._settings.mtls_client_cert_path
+        dial_address = (
+            self._settings.resolved_platform_enrollment_address
+            if no_client_identity
+            else self._settings.platform_address
+        )
 
         ca_cert = (
             self._settings.mtls_ca_cert_path.read_bytes()
@@ -194,7 +214,7 @@ class ControlClient:
             logger.info(
                 "opening mTLS channel to %s using persisted node identity (node_id=%s, "
                 "cert=%s, key=%s)",
-                self._settings.platform_address,
+                dial_address,
                 persisted.node_id,
                 persisted.cert_path,
                 persisted.key_path,
@@ -202,7 +222,7 @@ class ControlClient:
         elif client_cert is not None:
             logger.info(
                 "opening mTLS channel to %s (ca=%s, client_cert=%s, client_key=%s)",
-                self._settings.platform_address,
+                dial_address,
                 self._settings.mtls_ca_cert_path,
                 self._settings.mtls_client_cert_path,
                 self._settings.mtls_client_key_path,
@@ -210,11 +230,12 @@ class ControlClient:
         else:
             logger.info(
                 "opening server-authenticated TLS channel to %s (ca=%s, no client "
-                "certificate yet -- bootstrap enrollment via one-time token)",
-                self._settings.platform_address,
+                "certificate yet -- bootstrap enrollment via one-time token, "
+                "Platform's enrollment-only port)",
+                dial_address,
                 self._settings.mtls_ca_cert_path,
             )
-        return grpc.aio.secure_channel(self._settings.platform_address, credentials)
+        return grpc.aio.secure_channel(dial_address, credentials)
 
     # -- outgoing message builders ---------------------------------------------
 
